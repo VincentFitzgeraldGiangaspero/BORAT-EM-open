@@ -839,9 +839,6 @@ def cal_zone(number, g, q):
 
 
 ######################################################
-# tecio.py
-
-# Only SZL files are supported.  Use the ".szplt" extension
 
 
 def open_file(file_name, dataset_title, var_names, file_type=FILETYPE_GRIDANDSOLUTION, grid_file_handle=None):
