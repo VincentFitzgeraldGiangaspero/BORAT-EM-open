@@ -1,0 +1,11 @@
+pvMesh = None
+MeshPoints = None
+RefractiveIndexArray = None
+kdtree = None
+kdtreeBoundaryCFD = None
+BoundaryPEC = None
+BoundaryES = None
+BoundarySurfacesCFD = None
+BoundarySurfaces = None
+MeshPointsBoundaryCFD = None
+Solver=None
