@@ -6,19 +6,25 @@
 
 ## 📦 Installation
 
-1. **Using Conda (recommended)**  
+1. **Using Docker (recommended for reproducibility)**  
+   ```bash
+   docker build -t borat-em .
+   docker run -v $(pwd)/config:/app/config -v $(pwd)/Output:/app/Output borat-em
+   ```
+
+2. **Using Conda**  
    Import the virtual environment provided in:
    ```
    env/BORAT-EM_Linux.yaml
    ```
 
-2. **Or install dependencies manually**  
+3. **Or install dependencies manually**  
    Create your own virtual environment and install required packages:
    ```bash
    pip install pyvista scipy p-tqdm joblib
    ```
 
-3. **TecIO Library (Optional for Tecplot output)**  
+4. **TecIO Library (Optional for Tecplot output)**  
    Set the correct path to the TecIO shared library in `pytecio.py`.  
    If unavailable, deactivate TecIO output and rely on VTK output only.
 
@@ -26,9 +32,19 @@
 
 ## ▶️ Running BORAT
 
+### Local Execution
 Main entry point:
 ```bash
 python main.py
+```
+
+### Docker Execution
+```bash
+# Build the image
+docker build -t borat-em .
+
+# Run with volume mounts for config and output
+docker run -v $(pwd)/config:/app/config -v $(pwd)/Output:/app/Output borat-em
 ```
 
 Edit the configuration file in `config/ExoMars.cfg` to change the test case or parameters.
@@ -74,6 +90,8 @@ BORAT-EM-open/
 ├── 3DMeshes/           # VTK geometry files for boundaries (not provided)
 ├── CFD/                # CFD solutions (not provided)
 ├── Output/             # Simulation results
+├── Dockerfile          # Docker configuration for reproducible builds
+├── .dockerignore       # Docker build exclusions
 ├── LICENSE
 └── README.md           
 ```
