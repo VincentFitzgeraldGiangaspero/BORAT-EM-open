@@ -1,0 +1,9 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+Output/
+.DS_Store
+.env
+*.egg-info
