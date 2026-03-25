@@ -33,6 +33,13 @@ class Read:
         # Model selection (with fallback)
         self.Model = config.get("CFD", "Model", fallback="non_collisional")
 
+        # Boundary geometry files
+        self.BoundaryPEC_File = config.get("CFD", "BoundaryPEC_File", fallback="3DMeshes/ExoMars_Capsule_polydata.vtk")
+        self.BoundaryES_File = config.get("CFD", "BoundaryES_File", fallback="3DMeshes/Sphere20_capsule_coarse.vtk")
+        self.BoundarySurfacesCFD_File = config.get(
+            "CFD", "BoundarySurfacesCFD_File", fallback="3DMeshes/BoundaryCFD.vtk"
+        )
+
         # Antenna
 
         self.Frequency = config.getfloat("Antenna", "Frequency")

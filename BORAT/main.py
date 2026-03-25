@@ -93,9 +93,9 @@ if __name__ == "__main__":
     kdtree = KDTree(MeshPoints)
 
     # Load boundary geometry
-    BoundaryPEC = pv.PolyData("3DMeshes/ExoMars_Capsule_polydata.vtk").compute_normals(flip_normals=True)
-    BoundaryES = pv.PolyData("3DMeshes/Sphere20_capsule_coarse.vtk")
-    BoundarySurfacesCFD = pv.PolyData("3DMeshes/BoundaryCFD.vtk")
+    BoundaryPEC = pv.PolyData(Solver.BoundaryPEC_File).compute_normals(flip_normals=True)
+    BoundaryES = pv.PolyData(Solver.BoundaryES_File)
+    BoundarySurfacesCFD = pv.PolyData(Solver.BoundarySurfacesCFD_File)
 
     MeshPointsBoundaryCFD = np.array(BoundarySurfacesCFD.points)
     kdtreeBoundaryCFD = KDTree(MeshPointsBoundaryCFD)
