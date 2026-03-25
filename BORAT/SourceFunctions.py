@@ -1,16 +1,94 @@
 import pyvista as pv
 import numpy as np
-import meshzoo
 import math
 
 import Functions
 import EikonalSolver
 import pyacvd
+import numpy.typing as npt
+from scipy.spatial import ConvexHull
 
 import GlobalData
 
+###################################################################
+
+
+def _filter(points, faces, aperture):
+    threshold = np.cos(aperture)
+
+    # 1) Build the full hull and select “good” faces
+    keep = np.all(points[faces][:, :, 2] >= threshold, axis=1)
+    faces = faces[keep]
+
+    # 2) Build a mask of kept points and a re‑index map
+    mask = points[:, 2] >= threshold
+    new_index = np.full(len(points), -1, dtype=int)
+    new_index[mask] = np.arange(mask.sum())
+
+    # 3) Remap the faces to the compacted point array
+    faces = new_index[faces]  # each old idx → new idx
+
+    # 4) Return filtered points and raw vertex indices (N, 3) - NO prefix
+    new_points = points[mask]
+    faces = faces.astype(np.int64)
+
+    return new_points, faces
+
 
 ###################################################################
+
+
+def fibonacci_spherical_cone(n, aperture=np.pi, normal=[0.0, 0.0, 1.0], x0=[0.0, 0.0, 0.0], radius=1.0):
+    """
+    Sources:
+        - https://stackoverflow.com/a/26127012/15836556
+        - A. González, Measurement of Areas on a Sphere Using Fibonacci and Latitude-Longitude Lattices
+            file:///home/simon/Downloads/s11004-009-9257-x.pdf
+    """
+    PHI = np.pi * (np.sqrt(5.0) - 1.0)  # golden angle in radians
+    z = np.linspace(1, np.cos(aperture), n)
+    r = np.sqrt(1 - z**2)
+    phi = PHI * np.arange(n)
+    x = r * np.cos(phi)
+    y = r * np.sin(phi)
+
+    return x0 + radius * _align_3D(np.column_stack((x, y, z)), normal)
+
+
+def _align_3D(X: npt.NDArray, normal):
+    """
+    Rotates the elements in X (assumed to be around [0, 0, 1]) to be around normal
+    """
+    normal /= np.linalg.norm(normal)
+    Z_AXIS = np.array([0, 0, 1])
+    if not np.allclose(normal, Z_AXIS):
+        rotation_axis = np.cross(Z_AXIS, normal)
+        rotation_axis /= np.linalg.norm(rotation_axis)  # mathematically unnecessary, numerically it is
+        angle = np.arccos(np.clip(np.dot(Z_AXIS, normal), -1, 1))
+        R = Rotation.from_rotvec(angle * rotation_axis)
+        X = R.apply(X)
+    return X
+
+
+###################################################################
+
+
+def fibonacci_sphere(n, aperture=np.pi, radius=1.0):
+    N = round(2 * n / (1 - np.cos(aperture)))
+    points = fibonacci_spherical_cone(N)
+    faces = ConvexHull(points).simplices
+    p_new, f_new = _filter(points, faces, aperture)
+
+    # Build PyVista cell format like meshzoo does: [3, v0, v1, v2, 3, v0, v1, v2, ...]
+    arrayNodeMap = np.zeros(shape=(f_new.shape[0], 4), dtype=np.int64)
+    arrayNodeMap[:, 0] = 3
+    arrayNodeMap[:, 1:4] = f_new
+
+    return pv.PolyData(radius * p_new, arrayNodeMap.ravel())
+
+
+###################################################################
+
 
 def Antenna(Solver):
 
@@ -23,100 +101,79 @@ def Antenna(Solver):
     TotalRays = Solver.TotalRays
     rotationAxis = Solver.AntennaAxis
 
-    div = TotalRays//20
+    div = TotalRays // 20
     InitialConditions = []
     e0 = []
     e0_spherical = []
     E0_sperical = []
     E0_rho = []
 
-    n0, _, _, _ = EikonalSolver.RefractiveIndexInterpolation(
-        [a_location[0], a_location[1], a_location[2]])
+    n0, _, _, _ = EikonalSolver.RefractiveIndexInterpolation([a_location[0], a_location[1], a_location[2]])
 
-    points, cells = meshzoo.icosa_sphere(TotalRays)
+    # Create unit-radius mesh first (don't scale inside fibonacci_sphere)
+    icoSphere0 = fibonacci_sphere(TotalRays, Aperture, radius=1.0)
 
-    arrayNodeMap = np.zeros(shape=(cells.shape[0], 4), dtype='<i4')
-    arrayNodeMap[:, 0] = 3
-    arrayNodeMap[:, 1:4] = cells
+    points = icoSphere0.points
+    cells = icoSphere0.faces
+    totRay = points.shape[0]
 
-    icoSphere0 = pv.PolyData(points, arrayNodeMap.ravel())
+    # Now apply transformations at unit scale
+    originCut = [0, 0, np.sin((90 - Aperture) * np.pi / 180)]
 
-    originCut = [0, 0, np.sin((90-Aperture)*np.pi/180)]
-
-    icoSphere0 = icoSphere0.clip(normal='z', origin=originCut, invert=False)
+    icoSphere0 = icoSphere0.clip(normal="z", origin=originCut, invert=False)
 
     icoSphere0 = icoSphere0.rotate_vector((0, 1, 0), 90, inplace=True)
 
-    icoSphere0 = icoSphere0.scale([rho, rho, rho], inplace=True)
+    # Finally scale by rho
+    icoSphere = icoSphere0.scale([rho, rho, rho], inplace=True)
 
-    # clus = pyacvd.Clustering(icoSphere0)
-    # # mesh is not dense enough for uniform remeshing
-    # clus.subdivide(4)
-    # clus.cluster(TotalRays)
-
-    # # plot clustered cow mesh
-    # # clus.plot()
-
-    # icoSphere = clus.create_mesh()
-    
-    icoSphere = icoSphere0
-    
     points = icoSphere.points
 
     cells = icoSphere.faces
 
-    Normal = icoSphere.points/rho
+    Normal = icoSphere.points / rho
 
     totRay = icoSphere.n_points
     RayDir = np.zeros(shape=(icoSphere.n_points, 3))
 
     for nRay in range(totRay):
 
-        _, theta, phi = Functions.Cart2sphere(
-            Normal[nRay, 0], Normal[nRay, 1], Normal[nRay, 2])
+        _, theta, phi = Functions.Cart2sphere(Normal[nRay, 0], Normal[nRay, 1], Normal[nRay, 2])
 
         st = np.sin(theta)
         ct = np.cos(theta)
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
-        RayDir[nRay, 0] = r_versor[0]*n0
-        RayDir[nRay, 1] = r_versor[1]*n0
-        RayDir[nRay, 2] = r_versor[2]*n0
+        RayDir[nRay, 0] = r_versor[0] * n0
+        RayDir[nRay, 1] = r_versor[1] * n0
+        RayDir[nRay, 2] = r_versor[2] * n0
 
         if iPol == 1:
-            e = np.array([np.cos(theta)*np.cos(phi),
-                          np.cos(theta) * np.sin(phi),
-                          -np.sin(theta)])
+            e = np.array([np.cos(theta) * np.cos(phi), np.cos(theta) * np.sin(phi), -np.sin(theta)])
         else:
 
-            e = np.array([-np.sin(phi),
-                          np.cos(phi),
-                          0])
+            e = np.array([-np.sin(phi), np.cos(phi), 0])
 
-        e_spherical = np.array([np.dot(e, r_versor),
-                                np.dot(e, theta_versor),
-                                np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0.append(e)
         e0_spherical.append(e_spherical)
 
-        Edir = -e*np.sin(theta)
+        Edir = -e * np.sin(theta)
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
         # E0_amplitude_rays=E0_amplitude*1/rho
-        E0_amplitude_rays = E0_amplitude*1/rho
+        E0_amplitude_rays = E0_amplitude * 1 / rho
 
-        E0_rho.append(E0_amplitude_rays*Edir)
+        E0_rho.append(E0_amplitude_rays * Edir)
 
-        E0_sperical.append(E0_amplitude_rays*Edir_spherical)
+        E0_sperical.append(E0_amplitude_rays * Edir_spherical)
 
     E0_rho = np.array(E0_rho)
     e0 = np.array(e0)
@@ -125,43 +182,40 @@ def Antenna(Solver):
 
     Ray0 = pv.PolyData(points)
 
-    Ray0.point_data['kx'] = RayDir[:, 0]
-    Ray0.point_data['ky'] = RayDir[:, 1]
-    Ray0.point_data['kz'] = RayDir[:, 2]
+    Ray0.point_data["kx"] = RayDir[:, 0]
+    Ray0.point_data["ky"] = RayDir[:, 1]
+    Ray0.point_data["kz"] = RayDir[:, 2]
 
-    Ray0.point_data['ex'] = e0[:, 0]
-    Ray0.point_data['ey'] = e0[:, 1]
-    Ray0.point_data['ez'] = e0[:, 2]
+    Ray0.point_data["ex"] = e0[:, 0]
+    Ray0.point_data["ey"] = e0[:, 1]
+    Ray0.point_data["ez"] = e0[:, 2]
 
-    Ray0['er'] = e0_spherical[:, 0]
-    Ray0['et'] = e0_spherical[:, 1]
-    Ray0['ep'] = e0_spherical[:, 2]
+    Ray0["er"] = e0_spherical[:, 0]
+    Ray0["et"] = e0_spherical[:, 1]
+    Ray0["ep"] = e0_spherical[:, 2]
 
-    Ray0['K'] = np.column_stack([Ray0['kx'], Ray0['ky'], Ray0['kz']])
+    Ray0["K"] = np.column_stack([Ray0["kx"], Ray0["ky"], Ray0["kz"]])
 
-    Ray0['e0'] = np.column_stack([Ray0['ex'], Ray0['ey'], Ray0['ez']])
-    Ray0['e0_spherical'] = np.column_stack(
-        [Ray0['er'], Ray0['et'], Ray0['ep']])
+    Ray0["e0"] = np.column_stack([Ray0["ex"], Ray0["ey"], Ray0["ez"]])
+    Ray0["e0_spherical"] = np.column_stack([Ray0["er"], Ray0["et"], Ray0["ep"]])
 
-    Ray0['E0'] = np.column_stack(
-        [(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
+    Ray0["E0"] = np.column_stack([(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
 
-    Ray0['E0x'] = E0_rho[:, 0]
-    Ray0['E0y'] = E0_rho[:, 1]
-    Ray0['E0z'] = E0_rho[:, 2]
+    Ray0["E0x"] = E0_rho[:, 0]
+    Ray0["E0y"] = E0_rho[:, 1]
+    Ray0["E0z"] = E0_rho[:, 2]
 
-    Ray0['E0r'] = E0_sperical[:, 0]
-    Ray0['E0t'] = E0_sperical[:, 1]
-    Ray0['E0p'] = E0_sperical[:, 2]
+    Ray0["E0r"] = E0_sperical[:, 0]
+    Ray0["E0t"] = E0_sperical[:, 1]
+    Ray0["E0p"] = E0_sperical[:, 2]
 
-    Ray0['|E0|'] = np.sqrt(Ray0['E0x']**2+Ray0['E0y']**2+Ray0['E0z']**2)
+    Ray0["|E0|"] = np.sqrt(Ray0["E0x"] ** 2 + Ray0["E0y"] ** 2 + Ray0["E0z"] ** 2)
 
-    Ray0['E0_spherical'] = np.column_stack(
-        [Ray0['E0r'], Ray0['E0t'], Ray0['E0p']])
+    Ray0["E0_spherical"] = np.column_stack([Ray0["E0r"], Ray0["E0t"], Ray0["E0p"]])
 
     RayTube0 = pv.PolyData(points, cells)
 
-    totTubes = cells.shape[0]//4
+    totTubes = cells.shape[0] // 4
 
     e0_tube = []
     e0_tube_spherical = []
@@ -172,17 +226,15 @@ def Antenna(Solver):
     phiTube = []
 
     rVersor_cell = RayTube0.face_normals
-    RayTubes0 = RayTube0.compute_cell_sizes(
-        length=False, area=True, volume=False)
+    RayTubes0 = RayTube0.compute_cell_sizes(length=False, area=True, volume=False)
 
     rho_centers = RayTube0.cell_centers()
 
     for nTubes in range(totTubes):
 
-        ATube0.append(RayTubes0['Area'][nTubes])
+        ATube0.append(RayTubes0["Area"][nTubes])
 
-        _, theta, phi = Functions.Cart2sphere(
-            rVersor_cell[nTubes][0], rVersor_cell[nTubes][1], rVersor_cell[nTubes][2])
+        _, theta, phi = Functions.Cart2sphere(rVersor_cell[nTubes][0], rVersor_cell[nTubes][1], rVersor_cell[nTubes][2])
 
         thetaTube.append(theta)
         phiTube.append(phi)
@@ -192,29 +244,26 @@ def Antenna(Solver):
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
         e = theta_versor
-        e_spherical = np.array([np.dot(e, r_versor), np.dot(
-            e, theta_versor), np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0_tube.append(e)
         e0_tube_spherical.append(e_spherical)
 
-        Edir = -e*np.sin(theta)
+        Edir = -e * np.sin(theta)
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
         # E0_Tube = E0_amplitude*1/(np.linalg.norm(rho_centers.points[nTubes]))
-        E0_Tube = E0_amplitude*1/rho
+        E0_Tube = E0_amplitude * 1 / rho
 
         E0_tube.append(E0_Tube * Edir)
 
-        E0_tube_spherical.append(E0_Tube*Edir_spherical)
+        E0_tube_spherical.append(E0_Tube * Edir_spherical)
 
     e0_tube = np.array(e0_tube)
     e0_tube_spherical = np.array(e0_tube_spherical)
@@ -224,69 +273,78 @@ def Antenna(Solver):
     thetaTube = np.array(thetaTube)
     phiTube = np.array(phiTube)
 
-    RayTube0.cell_data['kx'] = rVersor_cell[:, 0]
-    RayTube0.cell_data['ky'] = rVersor_cell[:, 1]
-    RayTube0.cell_data['kz'] = rVersor_cell[:, 2]
+    RayTube0.cell_data["kx"] = rVersor_cell[:, 0]
+    RayTube0.cell_data["ky"] = rVersor_cell[:, 1]
+    RayTube0.cell_data["kz"] = rVersor_cell[:, 2]
 
-    RayTube0.cell_data['ex'] = e0_tube[:, 0]
-    RayTube0.cell_data['ey'] = e0_tube[:, 1]
-    RayTube0.cell_data['ez'] = e0_tube[:, 2]
+    RayTube0.cell_data["ex"] = e0_tube[:, 0]
+    RayTube0.cell_data["ey"] = e0_tube[:, 1]
+    RayTube0.cell_data["ez"] = e0_tube[:, 2]
 
-    RayTube0.cell_data['er'] = e0_tube_spherical[:, 0]
-    RayTube0.cell_data['et'] = e0_tube_spherical[:, 1]
-    RayTube0.cell_data['ep'] = e0_tube_spherical[:, 2]
+    RayTube0.cell_data["er"] = e0_tube_spherical[:, 0]
+    RayTube0.cell_data["et"] = e0_tube_spherical[:, 1]
+    RayTube0.cell_data["ep"] = e0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['E0x'] = E0_tube[:, 0]
-    RayTube0.cell_data['E0y'] = E0_tube[:, 1]
-    RayTube0.cell_data['E0z'] = E0_tube[:, 2]
+    RayTube0.cell_data["E0x"] = E0_tube[:, 0]
+    RayTube0.cell_data["E0y"] = E0_tube[:, 1]
+    RayTube0.cell_data["E0z"] = E0_tube[:, 2]
 
-    RayTube0.cell_data['E0r'] = E0_tube_spherical[:, 0]
-    RayTube0.cell_data['E0t'] = E0_tube_spherical[:, 1]
-    RayTube0.cell_data['E0p'] = E0_tube_spherical[:, 2]
+    RayTube0.cell_data["E0r"] = E0_tube_spherical[:, 0]
+    RayTube0.cell_data["E0t"] = E0_tube_spherical[:, 1]
+    RayTube0.cell_data["E0p"] = E0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['K'] = np.column_stack(
-        [RayTube0['kx'], RayTube0['ky'], RayTube0['kz']])
+    RayTube0.cell_data["K"] = np.column_stack([RayTube0["kx"], RayTube0["ky"], RayTube0["kz"]])
 
-    RayTube0.cell_data['e0'] = np.column_stack(
-        [RayTube0['ex'], RayTube0['ey'], RayTube0['ez']])
-    RayTube0.cell_data['e0_spherical'] = np.column_stack(
-        [RayTube0['er'], RayTube0['et'], RayTube0['ep']])
+    RayTube0.cell_data["e0"] = np.column_stack([RayTube0["ex"], RayTube0["ey"], RayTube0["ez"]])
+    RayTube0.cell_data["e0_spherical"] = np.column_stack([RayTube0["er"], RayTube0["et"], RayTube0["ep"]])
 
-    RayTube0.cell_data['E0'] = np.column_stack(
-        [RayTube0.cell_data['E0x'], RayTube0.cell_data['E0y'], RayTube0.cell_data['E0z']])
+    RayTube0.cell_data["E0"] = np.column_stack(
+        [RayTube0.cell_data["E0x"], RayTube0.cell_data["E0y"], RayTube0.cell_data["E0z"]]
+    )
 
-    RayTube0.cell_data['E0_spherical'] = np.column_stack(
-        [RayTube0.cell_data['E0r'], RayTube0.cell_data['E0t'], RayTube0.cell_data['E0p']])
+    RayTube0.cell_data["E0_spherical"] = np.column_stack(
+        [RayTube0.cell_data["E0r"], RayTube0.cell_data["E0t"], RayTube0.cell_data["E0p"]]
+    )
 
-    RayTube0.cell_data['|E0|'] = np.sqrt(
-        RayTube0['E0x']**2+RayTube0['E0y']**2+RayTube0['E0z']**2)
+    RayTube0.cell_data["|E0|"] = np.sqrt(RayTube0["E0x"] ** 2 + RayTube0["E0y"] ** 2 + RayTube0["E0z"] ** 2)
 
-    RayTube0.cell_data['Area'] = ATube0
+    RayTube0.cell_data["Area"] = ATube0
 
-    RayTube0.rotate_vector(rotationAxis, -rotationAngleDeg,
-                           inplace=True, transform_all_input_vectors=True)
+    RayTube0.rotate_vector(rotationAxis, -rotationAngleDeg, inplace=True, transform_all_input_vectors=True)
 
-    Ray0.rotate_vector(rotationAxis, -rotationAngleDeg,
-                       inplace=True, transform_all_input_vectors=True)
+    Ray0.rotate_vector(rotationAxis, -rotationAngleDeg, inplace=True, transform_all_input_vectors=True)
 
     RayTube0 = RayTube0.translate(
-        (a_location[0], a_location[1], a_location[2]), inplace=True, transform_all_input_vectors=True)
+        (a_location[0], a_location[1], a_location[2]), inplace=True, transform_all_input_vectors=True
+    )
 
-    Ray0 = Ray0.translate(
-        (a_location[0], a_location[1], a_location[2]), inplace=True, transform_all_input_vectors=True)
+    Ray0 = Ray0.translate((a_location[0], a_location[1], a_location[2]), inplace=True, transform_all_input_vectors=True)
 
     points = Ray0.points
 
     for nRay in range(totRay):
 
-        InitialConditions.append([points[nRay][0], points[nRay][1], points[nRay][2],
-                                  Ray0['K'][nRay][0], Ray0['K'][nRay][1], Ray0['K'][nRay][2],
-                                  Ray0['e0'][nRay][0], Ray0['e0'][nRay][1], Ray0['e0'][nRay][2],
-                                  0, 0])     # Change these initial conditions
+        InitialConditions.append(
+            [
+                points[nRay][0],
+                points[nRay][1],
+                points[nRay][2],
+                Ray0["K"][nRay][0],
+                Ray0["K"][nRay][1],
+                Ray0["K"][nRay][2],
+                Ray0["e0"][nRay][0],
+                Ray0["e0"][nRay][1],
+                Ray0["e0"][nRay][2],
+                0,
+                0,
+            ]
+        )  # Change these initial conditions
 
     return InitialConditions, Ray0, RayTube0
 
+
 ###################################################################
+
 
 def Antenna_rotated(rho, a_location, E0_amplitude, TotalRays, rotationAngle, rotationAxis, Aperture, iPol):
 
@@ -308,15 +366,15 @@ def Antenna_rotated(rho, a_location, E0_amplitude, TotalRays, rotationAngle, rot
 
     points, cells = meshzoo.icosa_sphere(20)
 
-    arrayNodeMap = np.zeros(shape=(cells.shape[0], 4), dtype='<i4')
+    arrayNodeMap = np.zeros(shape=(cells.shape[0], 4), dtype="<i4")
     arrayNodeMap[:, 0] = 3
     arrayNodeMap[:, 1:4] = cells
 
     icoSphere0 = pv.PolyData(points, arrayNodeMap.ravel())
 
-    originCut = [0, 0, np.sin((90-Aperture)*np.pi/180)]
+    originCut = [0, 0, np.sin((90 - Aperture) * np.pi / 180)]
 
-    icoSphere0 = icoSphere0.clip(normal='z', origin=originCut, invert=False)
+    icoSphere0 = icoSphere0.clip(normal="z", origin=originCut, invert=False)
 
     icoSphere0 = icoSphere0.rotate_vector((0, 1, 0), 90, inplace=True)
 
@@ -336,58 +394,49 @@ def Antenna_rotated(rho, a_location, E0_amplitude, TotalRays, rotationAngle, rot
 
     cells = icoSphere.faces
 
-    Normal = icoSphere.points/rho
+    Normal = icoSphere.points / rho
 
     totRay = icoSphere.n_points
     RayDir = np.zeros(shape=(icoSphere.n_points, 3))
 
     for nRay in range(totRay):
 
-        _, theta, phi = Functions.Cart2sphere(
-            Normal[nRay, 0], Normal[nRay, 1], Normal[nRay, 2])
+        _, theta, phi = Functions.Cart2sphere(Normal[nRay, 0], Normal[nRay, 1], Normal[nRay, 2])
 
         st = np.sin(theta)
         ct = np.cos(theta)
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
-        RayDir[nRay, 0] = r_versor[0]*n0
-        RayDir[nRay, 1] = r_versor[1]*n0
-        RayDir[nRay, 2] = r_versor[2]*n0
+        RayDir[nRay, 0] = r_versor[0] * n0
+        RayDir[nRay, 1] = r_versor[1] * n0
+        RayDir[nRay, 2] = r_versor[2] * n0
 
         if iPol == 1:
-            e = np.array([np.cos(theta)*np.cos(phi),
-                          np.cos(theta) * np.sin(phi),
-                          -np.sin(theta)])
+            e = np.array([np.cos(theta) * np.cos(phi), np.cos(theta) * np.sin(phi), -np.sin(theta)])
         else:
 
-            e = np.array([-np.sin(phi),
-                          np.cos(phi),
-                          0])
+            e = np.array([-np.sin(phi), np.cos(phi), 0])
 
-        e_spherical = np.array([np.dot(e, r_versor),
-                                np.dot(e, theta_versor),
-                                np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0.append(e)
         e0_spherical.append(e_spherical)
 
-        Edir = -e*np.sin(theta)
+        Edir = -e * np.sin(theta)
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
         # E0_amplitude_rays=E0_amplitude*1/rho
-        E0_amplitude_rays = E0_amplitude*1/rho
+        E0_amplitude_rays = E0_amplitude * 1 / rho
 
-        E0_rho.append(E0_amplitude_rays*Edir)
+        E0_rho.append(E0_amplitude_rays * Edir)
 
-        E0_sperical.append(E0_amplitude_rays*Edir_spherical)
+        E0_sperical.append(E0_amplitude_rays * Edir_spherical)
 
     E0_rho = np.array(E0_rho)
     e0 = np.array(e0)
@@ -396,43 +445,40 @@ def Antenna_rotated(rho, a_location, E0_amplitude, TotalRays, rotationAngle, rot
 
     Ray0 = pv.PolyData(points)
 
-    Ray0.point_data['kx'] = RayDir[:, 0]
-    Ray0.point_data['ky'] = RayDir[:, 1]
-    Ray0.point_data['kz'] = RayDir[:, 2]
+    Ray0.point_data["kx"] = RayDir[:, 0]
+    Ray0.point_data["ky"] = RayDir[:, 1]
+    Ray0.point_data["kz"] = RayDir[:, 2]
 
-    Ray0.point_data['ex'] = e0[:, 0]
-    Ray0.point_data['ey'] = e0[:, 1]
-    Ray0.point_data['ez'] = e0[:, 2]
+    Ray0.point_data["ex"] = e0[:, 0]
+    Ray0.point_data["ey"] = e0[:, 1]
+    Ray0.point_data["ez"] = e0[:, 2]
 
-    Ray0['er'] = e0_spherical[:, 0]
-    Ray0['et'] = e0_spherical[:, 1]
-    Ray0['ep'] = e0_spherical[:, 2]
+    Ray0["er"] = e0_spherical[:, 0]
+    Ray0["et"] = e0_spherical[:, 1]
+    Ray0["ep"] = e0_spherical[:, 2]
 
-    Ray0['K'] = np.column_stack([Ray0['kx'], Ray0['ky'], Ray0['kz']])
+    Ray0["K"] = np.column_stack([Ray0["kx"], Ray0["ky"], Ray0["kz"]])
 
-    Ray0['e0'] = np.column_stack([Ray0['ex'], Ray0['ey'], Ray0['ez']])
-    Ray0['e0_spherical'] = np.column_stack(
-        [Ray0['er'], Ray0['et'], Ray0['ep']])
+    Ray0["e0"] = np.column_stack([Ray0["ex"], Ray0["ey"], Ray0["ez"]])
+    Ray0["e0_spherical"] = np.column_stack([Ray0["er"], Ray0["et"], Ray0["ep"]])
 
-    Ray0['E0'] = np.column_stack(
-        [(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
+    Ray0["E0"] = np.column_stack([(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
 
-    Ray0['E0x'] = E0_rho[:, 0]
-    Ray0['E0y'] = E0_rho[:, 1]
-    Ray0['E0z'] = E0_rho[:, 2]
+    Ray0["E0x"] = E0_rho[:, 0]
+    Ray0["E0y"] = E0_rho[:, 1]
+    Ray0["E0z"] = E0_rho[:, 2]
 
-    Ray0['E0r'] = E0_sperical[:, 0]
-    Ray0['E0t'] = E0_sperical[:, 1]
-    Ray0['E0p'] = E0_sperical[:, 2]
+    Ray0["E0r"] = E0_sperical[:, 0]
+    Ray0["E0t"] = E0_sperical[:, 1]
+    Ray0["E0p"] = E0_sperical[:, 2]
 
-    Ray0['|E0|'] = np.sqrt(Ray0['E0x']**2+Ray0['E0y']**2+Ray0['E0z']**2)
+    Ray0["|E0|"] = np.sqrt(Ray0["E0x"] ** 2 + Ray0["E0y"] ** 2 + Ray0["E0z"] ** 2)
 
-    Ray0['E0_spherical'] = np.column_stack(
-        [Ray0['E0r'], Ray0['E0t'], Ray0['E0p']])
+    Ray0["E0_spherical"] = np.column_stack([Ray0["E0r"], Ray0["E0t"], Ray0["E0p"]])
 
     RayTube0 = pv.PolyData(points, cells)
 
-    totTubes = cells.shape[0]//4
+    totTubes = cells.shape[0] // 4
 
     e0_tube = []
     e0_tube_spherical = []
@@ -443,17 +489,15 @@ def Antenna_rotated(rho, a_location, E0_amplitude, TotalRays, rotationAngle, rot
     phiTube = []
 
     rVersor_cell = RayTube0.face_normals
-    RayTubes0 = RayTube0.compute_cell_sizes(
-        length=False, area=True, volume=False)
+    RayTubes0 = RayTube0.compute_cell_sizes(length=False, area=True, volume=False)
 
     rho_centers = RayTube0.cell_centers()
 
     for nTubes in range(totTubes):
 
-        ATube0.append(RayTubes0['Area'][nTubes])
+        ATube0.append(RayTubes0["Area"][nTubes])
 
-        _, theta, phi = Functions.Cart2sphere(
-            rVersor_cell[nTubes][0], rVersor_cell[nTubes][1], rVersor_cell[nTubes][2])
+        _, theta, phi = Functions.Cart2sphere(rVersor_cell[nTubes][0], rVersor_cell[nTubes][1], rVersor_cell[nTubes][2])
 
         thetaTube.append(theta)
         phiTube.append(phi)
@@ -463,29 +507,26 @@ def Antenna_rotated(rho, a_location, E0_amplitude, TotalRays, rotationAngle, rot
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
         e = theta_versor
-        e_spherical = np.array([np.dot(e, r_versor), np.dot(
-            e, theta_versor), np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0_tube.append(e)
         e0_tube_spherical.append(e_spherical)
 
-        Edir = -e*np.sin(theta)
+        Edir = -e * np.sin(theta)
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
         # E0_Tube = E0_amplitude*1/(np.linalg.norm(rho_centers.points[nTubes]))
-        E0_Tube = E0_amplitude*1/rho
+        E0_Tube = E0_amplitude * 1 / rho
 
         E0_tube.append(E0_Tube * Edir)
 
-        E0_tube_spherical.append(E0_Tube*Edir_spherical)
+        E0_tube_spherical.append(E0_Tube * Edir_spherical)
 
     e0_tube = np.array(e0_tube)
     e0_tube_spherical = np.array(e0_tube_spherical)
@@ -495,44 +536,42 @@ def Antenna_rotated(rho, a_location, E0_amplitude, TotalRays, rotationAngle, rot
     thetaTube = np.array(thetaTube)
     phiTube = np.array(phiTube)
 
-    RayTube0.cell_data['kx'] = rVersor_cell[:, 0]
-    RayTube0.cell_data['ky'] = rVersor_cell[:, 1]
-    RayTube0.cell_data['kz'] = rVersor_cell[:, 2]
+    RayTube0.cell_data["kx"] = rVersor_cell[:, 0]
+    RayTube0.cell_data["ky"] = rVersor_cell[:, 1]
+    RayTube0.cell_data["kz"] = rVersor_cell[:, 2]
 
-    RayTube0.cell_data['ex'] = e0_tube[:, 0]
-    RayTube0.cell_data['ey'] = e0_tube[:, 1]
-    RayTube0.cell_data['ez'] = e0_tube[:, 2]
+    RayTube0.cell_data["ex"] = e0_tube[:, 0]
+    RayTube0.cell_data["ey"] = e0_tube[:, 1]
+    RayTube0.cell_data["ez"] = e0_tube[:, 2]
 
-    RayTube0.cell_data['er'] = e0_tube_spherical[:, 0]
-    RayTube0.cell_data['et'] = e0_tube_spherical[:, 1]
-    RayTube0.cell_data['ep'] = e0_tube_spherical[:, 2]
+    RayTube0.cell_data["er"] = e0_tube_spherical[:, 0]
+    RayTube0.cell_data["et"] = e0_tube_spherical[:, 1]
+    RayTube0.cell_data["ep"] = e0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['E0x'] = E0_tube[:, 0]
-    RayTube0.cell_data['E0y'] = E0_tube[:, 1]
-    RayTube0.cell_data['E0z'] = E0_tube[:, 2]
+    RayTube0.cell_data["E0x"] = E0_tube[:, 0]
+    RayTube0.cell_data["E0y"] = E0_tube[:, 1]
+    RayTube0.cell_data["E0z"] = E0_tube[:, 2]
 
-    RayTube0.cell_data['E0r'] = E0_tube_spherical[:, 0]
-    RayTube0.cell_data['E0t'] = E0_tube_spherical[:, 1]
-    RayTube0.cell_data['E0p'] = E0_tube_spherical[:, 2]
+    RayTube0.cell_data["E0r"] = E0_tube_spherical[:, 0]
+    RayTube0.cell_data["E0t"] = E0_tube_spherical[:, 1]
+    RayTube0.cell_data["E0p"] = E0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['K'] = np.column_stack(
-        [RayTube0['kx'], RayTube0['ky'], RayTube0['kz']])
+    RayTube0.cell_data["K"] = np.column_stack([RayTube0["kx"], RayTube0["ky"], RayTube0["kz"]])
 
-    RayTube0.cell_data['e0'] = np.column_stack(
-        [RayTube0['ex'], RayTube0['ey'], RayTube0['ez']])
-    RayTube0.cell_data['e0_spherical'] = np.column_stack(
-        [RayTube0['er'], RayTube0['et'], RayTube0['ep']])
+    RayTube0.cell_data["e0"] = np.column_stack([RayTube0["ex"], RayTube0["ey"], RayTube0["ez"]])
+    RayTube0.cell_data["e0_spherical"] = np.column_stack([RayTube0["er"], RayTube0["et"], RayTube0["ep"]])
 
-    RayTube0.cell_data['E0'] = np.column_stack(
-        [RayTube0.cell_data['E0x'], RayTube0.cell_data['E0y'], RayTube0.cell_data['E0z']])
+    RayTube0.cell_data["E0"] = np.column_stack(
+        [RayTube0.cell_data["E0x"], RayTube0.cell_data["E0y"], RayTube0.cell_data["E0z"]]
+    )
 
-    RayTube0.cell_data['E0_spherical'] = np.column_stack(
-        [RayTube0.cell_data['E0r'], RayTube0.cell_data['E0t'], RayTube0.cell_data['E0p']])
+    RayTube0.cell_data["E0_spherical"] = np.column_stack(
+        [RayTube0.cell_data["E0r"], RayTube0.cell_data["E0t"], RayTube0.cell_data["E0p"]]
+    )
 
-    RayTube0.cell_data['|E0|'] = np.sqrt(
-        RayTube0['E0x']**2+RayTube0['E0y']**2+RayTube0['E0z']**2)
+    RayTube0.cell_data["|E0|"] = np.sqrt(RayTube0["E0x"] ** 2 + RayTube0["E0y"] ** 2 + RayTube0["E0z"] ** 2)
 
-    RayTube0.cell_data['Area'] = ATube0
+    RayTube0.cell_data["Area"] = ATube0
 
     # RayTube0.rotate_vector([1,0,0], 90,
     #                        inplace=True, transform_all_input_vectors=True)
@@ -540,30 +579,41 @@ def Antenna_rotated(rho, a_location, E0_amplitude, TotalRays, rotationAngle, rot
     # Ray0.rotate_vector([1,0,0], 90,
     #                    inplace=True, transform_all_input_vectors=True)
 
-    RayTube0.rotate_vector(rotationAxis, -rotationAngle,
-                           inplace=True, transform_all_input_vectors=True)
+    RayTube0.rotate_vector(rotationAxis, -rotationAngle, inplace=True, transform_all_input_vectors=True)
 
-    Ray0.rotate_vector(rotationAxis, -rotationAngle,
-                       inplace=True, transform_all_input_vectors=True)
+    Ray0.rotate_vector(rotationAxis, -rotationAngle, inplace=True, transform_all_input_vectors=True)
 
     RayTube0 = RayTube0.translate(
-        (a_location[0], a_location[1], a_location[2]), inplace=True, transform_all_input_vectors=True)
+        (a_location[0], a_location[1], a_location[2]), inplace=True, transform_all_input_vectors=True
+    )
 
-    Ray0 = Ray0.translate(
-        (a_location[0], a_location[1], a_location[2]), inplace=True, transform_all_input_vectors=True)
+    Ray0 = Ray0.translate((a_location[0], a_location[1], a_location[2]), inplace=True, transform_all_input_vectors=True)
 
     points = Ray0.points
 
     for nRay in range(totRay):
 
-        InitialConditions.append([points[nRay][0], points[nRay][1], points[nRay][2],
-                                  Ray0['K'][nRay][0], Ray0['K'][nRay][1], Ray0['K'][nRay][2],
-                                  Ray0['e0'][nRay][0], Ray0['e0'][nRay][1], Ray0['e0'][nRay][2],
-                                  0, 0])     # Change these initial conditions
+        InitialConditions.append(
+            [
+                points[nRay][0],
+                points[nRay][1],
+                points[nRay][2],
+                Ray0["K"][nRay][0],
+                Ray0["K"][nRay][1],
+                Ray0["K"][nRay][2],
+                Ray0["e0"][nRay][0],
+                Ray0["e0"][nRay][1],
+                Ray0["e0"][nRay][2],
+                0,
+                0,
+            ]
+        )  # Change these initial conditions
 
     return InitialConditions, Ray0, RayTube0
 
+
 ###################################################################
+
 
 def Dipole(rho, a_location, E0_amplitude, nDivisionSource, iPol):
 
@@ -575,16 +625,15 @@ def Dipole(rho, a_location, E0_amplitude, nDivisionSource, iPol):
 
     points, cells = meshzoo.icosa_sphere(nDivisionSource)
 
-    points = points*rho
+    points = points * rho
 
-    arrayNodeMap = np.zeros(shape=(cells.shape[0], 4), dtype='<i4')
+    arrayNodeMap = np.zeros(shape=(cells.shape[0], 4), dtype="<i4")
     arrayNodeMap[:, 0] = 3
     arrayNodeMap[:, 1:4] = cells
 
     icoSphere = pv.PolyData(points, arrayNodeMap.ravel())
 
-    icoSphere = icoSphere.translate(
-        (a_location[0], a_location[1], a_location[2]), inplace=True)
+    icoSphere = icoSphere.translate((a_location[0], a_location[1], a_location[2]), inplace=True)
 
     Normal = icoSphere.point_normals
 
@@ -596,8 +645,7 @@ def Dipole(rho, a_location, E0_amplitude, nDivisionSource, iPol):
 
     for nRay in range(totRay):
 
-        _, theta, phi = Functions.Cart2sphere(
-            Normal[nRay, 0], Normal[nRay, 1], Normal[nRay, 2])
+        _, theta, phi = Functions.Cart2sphere(Normal[nRay, 0], Normal[nRay, 1], Normal[nRay, 2])
 
         st = np.sin(theta)
         ct = np.cos(theta)
@@ -606,48 +654,41 @@ def Dipole(rho, a_location, E0_amplitude, nDivisionSource, iPol):
 
         z_versor = np.array([0, 0, 1])
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
         n0 = 1
 
-        RayDir1 = r_versor[0]*n0
-        RayDir2 = r_versor[1]*n0
-        RayDir3 = r_versor[2]*n0
+        RayDir1 = r_versor[0] * n0
+        RayDir2 = r_versor[1] * n0
+        RayDir3 = r_versor[2] * n0
 
         if iPol == 1:
-            e = np.array([np.cos(theta)*np.cos(phi),
-                          np.cos(theta) * np.sin(phi),
-                          -np.sin(theta)])
+            e = np.array([np.cos(theta) * np.cos(phi), np.cos(theta) * np.sin(phi), -np.sin(theta)])
         else:
 
-            e = np.array([-np.sin(phi),
-                          np.cos(phi),
-                          0])
+            e = np.array([-np.sin(phi), np.cos(phi), 0])
 
-        e_spherical = np.array([np.dot(e, r_versor),
-                                np.dot(e, theta_versor),
-                                np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0.append(e)
         e0_spherical.append(e_spherical)
 
-        Edir = e*np.sin(theta)
+        Edir = e * np.sin(theta)
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
         # E0_amplitude_rays=E0_amplitude*1/rho
         E0_amplitude_rays = E0_amplitude
 
-        E0_rho.append(E0_amplitude_rays*Edir)
+        E0_rho.append(E0_amplitude_rays * Edir)
 
-        E0_sperical.append(E0_amplitude_rays*Edir_spherical)
+        E0_sperical.append(E0_amplitude_rays * Edir_spherical)
 
-        InitialConditions.append([points[nRay][0], points[nRay][1], points[nRay][2], RayDir1,
-                                  RayDir2, RayDir3, e[0], e[1], e[2], 0, 0])     # Change these initial conditions
+        InitialConditions.append(
+            [points[nRay][0], points[nRay][1], points[nRay][2], RayDir1, RayDir2, RayDir3, e[0], e[1], e[2], 0, 0]
+        )  # Change these initial conditions
 
     E0_rho = np.array(E0_rho)
     e0 = np.array(e0)
@@ -656,43 +697,40 @@ def Dipole(rho, a_location, E0_amplitude, nDivisionSource, iPol):
 
     Ray0 = pv.PolyData(np.array(InitialConditions)[:, 0:3])
 
-    Ray0['kx'] = np.array(InitialConditions)[:, 3]
-    Ray0['ky'] = np.array(InitialConditions)[:, 4]
-    Ray0['kz'] = np.array(InitialConditions)[:, 5]
+    Ray0["kx"] = np.array(InitialConditions)[:, 3]
+    Ray0["ky"] = np.array(InitialConditions)[:, 4]
+    Ray0["kz"] = np.array(InitialConditions)[:, 5]
 
-    Ray0['ex'] = np.array(InitialConditions)[:, 6]
-    Ray0['ey'] = np.array(InitialConditions)[:, 7]
-    Ray0['ez'] = np.array(InitialConditions)[:, 8]
+    Ray0["ex"] = np.array(InitialConditions)[:, 6]
+    Ray0["ey"] = np.array(InitialConditions)[:, 7]
+    Ray0["ez"] = np.array(InitialConditions)[:, 8]
 
-    Ray0['er'] = e0_spherical[:, 0]
-    Ray0['et'] = e0_spherical[:, 1]
-    Ray0['ep'] = e0_spherical[:, 2]
+    Ray0["er"] = e0_spherical[:, 0]
+    Ray0["et"] = e0_spherical[:, 1]
+    Ray0["ep"] = e0_spherical[:, 2]
 
-    Ray0['K'] = np.column_stack([Ray0['kx'], Ray0['ky'], Ray0['kz']])
+    Ray0["K"] = np.column_stack([Ray0["kx"], Ray0["ky"], Ray0["kz"]])
 
-    Ray0['e0'] = np.column_stack([Ray0['ex'], Ray0['ey'], Ray0['ez']])
-    Ray0['e0_spherical'] = np.column_stack(
-        [Ray0['er'], Ray0['et'], Ray0['ep']])
+    Ray0["e0"] = np.column_stack([Ray0["ex"], Ray0["ey"], Ray0["ez"]])
+    Ray0["e0_spherical"] = np.column_stack([Ray0["er"], Ray0["et"], Ray0["ep"]])
 
-    Ray0['E0'] = np.column_stack(
-        [(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
+    Ray0["E0"] = np.column_stack([(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
 
-    Ray0['E0x'] = E0_rho[:, 0]
-    Ray0['E0y'] = E0_rho[:, 1]
-    Ray0['E0z'] = E0_rho[:, 2]
+    Ray0["E0x"] = E0_rho[:, 0]
+    Ray0["E0y"] = E0_rho[:, 1]
+    Ray0["E0z"] = E0_rho[:, 2]
 
-    Ray0['E0r'] = E0_sperical[:, 0]
-    Ray0['E0t'] = E0_sperical[:, 1]
-    Ray0['E0p'] = E0_sperical[:, 2]
+    Ray0["E0r"] = E0_sperical[:, 0]
+    Ray0["E0t"] = E0_sperical[:, 1]
+    Ray0["E0p"] = E0_sperical[:, 2]
 
-    Ray0['|E0|'] = np.sqrt(Ray0['E0x']**2+Ray0['E0y']**2+Ray0['E0z']**2)
+    Ray0["|E0|"] = np.sqrt(Ray0["E0x"] ** 2 + Ray0["E0y"] ** 2 + Ray0["E0z"] ** 2)
 
-    Ray0['E0_spherical'] = np.column_stack(
-        [Ray0['E0r'], Ray0['E0t'], Ray0['E0p']])
+    Ray0["E0_spherical"] = np.column_stack([Ray0["E0r"], Ray0["E0t"], Ray0["E0p"]])
 
     RayTube0 = pv.PolyData(np.array(InitialConditions)[:, 0:3], cells)
 
-    totTubes = cells.shape[0]//4
+    totTubes = cells.shape[0] // 4
 
     e0_tube = []
     e0_tube_spherical = []
@@ -704,17 +742,15 @@ def Dipole(rho, a_location, E0_amplitude, nDivisionSource, iPol):
 
     zversor = np.array([0, 0, 1])
     rVersor_cell = RayTube0.face_normals
-    RayTubes0 = RayTube0.compute_cell_sizes(
-        length=False, area=True, volume=False)
+    RayTubes0 = RayTube0.compute_cell_sizes(length=False, area=True, volume=False)
 
     rho_centers = RayTube0.cell_centers()
 
     for nTubes in range(totTubes):
 
-        ATube0.append(RayTubes0['Area'][nTubes])
+        ATube0.append(RayTubes0["Area"][nTubes])
 
-        _, theta, phi = Functions.Cart2sphere(
-            rVersor_cell[nTubes][0], rVersor_cell[nTubes][1], rVersor_cell[nTubes][2])
+        _, theta, phi = Functions.Cart2sphere(rVersor_cell[nTubes][0], rVersor_cell[nTubes][1], rVersor_cell[nTubes][2])
 
         thetaTube.append(theta)
         phiTube.append(phi)
@@ -724,29 +760,26 @@ def Dipole(rho, a_location, E0_amplitude, nDivisionSource, iPol):
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
         e = -theta_versor
-        e_spherical = np.array([np.dot(e, r_versor), np.dot(
-            e, theta_versor), np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0_tube.append(e)
         e0_tube_spherical.append(e_spherical)
 
-        Edir = -theta_versor*np.sin(theta)
+        Edir = -theta_versor * np.sin(theta)
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
         # E0_Tube = E0_amplitude*1/(np.linalg.norm(rho_centers.points[nTubes]))
         E0_Tube = E0_amplitude
 
         E0_tube.append(E0_Tube * Edir)
 
-        E0_tube_spherical.append(E0_Tube*Edir_spherical)
+        E0_tube_spherical.append(E0_Tube * Edir_spherical)
 
     e0_tube = np.array(e0_tube)
     e0_tube_spherical = np.array(e0_tube_spherical)
@@ -756,46 +789,45 @@ def Dipole(rho, a_location, E0_amplitude, nDivisionSource, iPol):
     thetaTube = np.array(thetaTube)
     phiTube = np.array(phiTube)
 
-    RayTube0.cell_data['kx'] = rVersor_cell[:, 0]
-    RayTube0.cell_data['ky'] = rVersor_cell[:, 1]
-    RayTube0.cell_data['kz'] = rVersor_cell[:, 2]
+    RayTube0.cell_data["kx"] = rVersor_cell[:, 0]
+    RayTube0.cell_data["ky"] = rVersor_cell[:, 1]
+    RayTube0.cell_data["kz"] = rVersor_cell[:, 2]
 
-    RayTube0.cell_data['ex'] = e0_tube[:, 0]
-    RayTube0.cell_data['ey'] = e0_tube[:, 1]
-    RayTube0.cell_data['ez'] = e0_tube[:, 2]
+    RayTube0.cell_data["ex"] = e0_tube[:, 0]
+    RayTube0.cell_data["ey"] = e0_tube[:, 1]
+    RayTube0.cell_data["ez"] = e0_tube[:, 2]
 
-    RayTube0.cell_data['er'] = e0_tube_spherical[:, 0]
-    RayTube0.cell_data['et'] = e0_tube_spherical[:, 1]
-    RayTube0.cell_data['ep'] = e0_tube_spherical[:, 2]
+    RayTube0.cell_data["er"] = e0_tube_spherical[:, 0]
+    RayTube0.cell_data["et"] = e0_tube_spherical[:, 1]
+    RayTube0.cell_data["ep"] = e0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['E0x'] = E0_tube[:, 0]
-    RayTube0.cell_data['E0y'] = E0_tube[:, 1]
-    RayTube0.cell_data['E0z'] = E0_tube[:, 2]
+    RayTube0.cell_data["E0x"] = E0_tube[:, 0]
+    RayTube0.cell_data["E0y"] = E0_tube[:, 1]
+    RayTube0.cell_data["E0z"] = E0_tube[:, 2]
 
-    RayTube0.cell_data['E0r'] = E0_tube_spherical[:, 0]
-    RayTube0.cell_data['E0t'] = E0_tube_spherical[:, 1]
-    RayTube0.cell_data['E0p'] = E0_tube_spherical[:, 2]
+    RayTube0.cell_data["E0r"] = E0_tube_spherical[:, 0]
+    RayTube0.cell_data["E0t"] = E0_tube_spherical[:, 1]
+    RayTube0.cell_data["E0p"] = E0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['K'] = np.column_stack(
-        [RayTube0['kx'], RayTube0['ky'], RayTube0['kz']])
+    RayTube0.cell_data["K"] = np.column_stack([RayTube0["kx"], RayTube0["ky"], RayTube0["kz"]])
 
-    RayTube0.cell_data['e0'] = np.column_stack(
-        [RayTube0['ex'], RayTube0['ey'], RayTube0['ez']])
-    RayTube0.cell_data['e0_spherical'] = np.column_stack(
-        [RayTube0['er'], RayTube0['et'], RayTube0['ep']])
+    RayTube0.cell_data["e0"] = np.column_stack([RayTube0["ex"], RayTube0["ey"], RayTube0["ez"]])
+    RayTube0.cell_data["e0_spherical"] = np.column_stack([RayTube0["er"], RayTube0["et"], RayTube0["ep"]])
 
-    RayTube0.cell_data['E0'] = np.column_stack(
-        [RayTube0.cell_data['E0x'], RayTube0.cell_data['E0y'], RayTube0.cell_data['E0z']])
+    RayTube0.cell_data["E0"] = np.column_stack(
+        [RayTube0.cell_data["E0x"], RayTube0.cell_data["E0y"], RayTube0.cell_data["E0z"]]
+    )
 
-    RayTube0.cell_data['E0_spherical'] = np.column_stack(
-        [RayTube0.cell_data['E0r'], RayTube0.cell_data['E0t'], RayTube0.cell_data['E0p']])
+    RayTube0.cell_data["E0_spherical"] = np.column_stack(
+        [RayTube0.cell_data["E0r"], RayTube0.cell_data["E0t"], RayTube0.cell_data["E0p"]]
+    )
 
-    RayTube0.cell_data['|E0|'] = np.sqrt(
-        RayTube0['E0x']**2+RayTube0['E0y']**2+RayTube0['E0z']**2)
+    RayTube0.cell_data["|E0|"] = np.sqrt(RayTube0["E0x"] ** 2 + RayTube0["E0y"] ** 2 + RayTube0["E0z"] ** 2)
 
-    RayTube0.cell_data['Area'] = ATube0
+    RayTube0.cell_data["Area"] = ATube0
 
     return InitialConditions, Ray0, RayTube0
+
 
 ###################################################################
 
@@ -808,13 +840,11 @@ def PlaneWaveSquare(size, K, a_location, E0_amplitude, nDivisionSource, iPol):
     E0_sperical = []
     E0_rho = []
 
-    mesh = pv.Plane(i_size=size, j_size=size, direction=K,
-                    i_resolution=nDivisionSource, j_resolution=nDivisionSource)
+    mesh = pv.Plane(i_size=size, j_size=size, direction=K, i_resolution=nDivisionSource, j_resolution=nDivisionSource)
 
     mesh = mesh.triangulate()
 
-    mesh = mesh.translate(
-        (a_location[0], a_location[1], a_location[2]), inplace=True)
+    mesh = mesh.translate((a_location[0], a_location[1], a_location[2]), inplace=True)
 
     points = mesh.points
 
@@ -826,54 +856,46 @@ def PlaneWaveSquare(size, K, a_location, E0_amplitude, nDivisionSource, iPol):
 
     for nRay in range(totRay):
 
-        _, theta, phi = Functions.Cart2sphere(
-            Normal[0], Normal[1], Normal[2])
+        _, theta, phi = Functions.Cart2sphere(Normal[0], Normal[1], Normal[2])
 
         st = np.sin(theta)
         ct = np.cos(theta)
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
         n0 = 1
 
-        RayDir1 = r_versor[0]*n0
-        RayDir2 = r_versor[1]*n0
-        RayDir3 = r_versor[2]*n0
+        RayDir1 = r_versor[0] * n0
+        RayDir2 = r_versor[1] * n0
+        RayDir3 = r_versor[2] * n0
 
         if iPol == 1:
-            e = np.array([np.cos(theta)*np.cos(phi),
-                          np.cos(theta) * np.sin(phi),
-                          -np.sin(theta)])
+            e = np.array([np.cos(theta) * np.cos(phi), np.cos(theta) * np.sin(phi), -np.sin(theta)])
         else:
 
-            e = np.array([-np.sin(phi),
-                          np.cos(phi),
-                          0])
+            e = np.array([-np.sin(phi), np.cos(phi), 0])
 
-        e_spherical = np.array([np.dot(e, r_versor),
-                                np.dot(e, theta_versor),
-                                np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0.append(e)
         e0_spherical.append(e_spherical)
 
         Edir = e
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
-        E0_rho.append(E0_amplitude*Edir)
+        E0_rho.append(E0_amplitude * Edir)
         # E0_rho.append(E0_amplitude*e0*np.exp(1j*k*rho))
 
-        E0_sperical.append(E0_amplitude*Edir_spherical)
+        E0_sperical.append(E0_amplitude * Edir_spherical)
 
-        InitialConditions.append([points[nRay][0], points[nRay][1], points[nRay][2], RayDir1,
-                                  RayDir2, RayDir3, e[0], e[1], e[2], 0, 0])     # Change these initial conditions
+        InitialConditions.append(
+            [points[nRay][0], points[nRay][1], points[nRay][2], RayDir1, RayDir2, RayDir3, e[0], e[1], e[2], 0, 0]
+        )  # Change these initial conditions
 
     E0_rho = np.array(E0_rho)
     e0 = np.array(e0)
@@ -882,43 +904,40 @@ def PlaneWaveSquare(size, K, a_location, E0_amplitude, nDivisionSource, iPol):
 
     Ray0 = pv.PolyData(np.array(InitialConditions)[:, 0:3])
 
-    Ray0['kx'] = np.array(InitialConditions)[:, 3]
-    Ray0['ky'] = np.array(InitialConditions)[:, 4]
-    Ray0['kz'] = np.array(InitialConditions)[:, 5]
+    Ray0["kx"] = np.array(InitialConditions)[:, 3]
+    Ray0["ky"] = np.array(InitialConditions)[:, 4]
+    Ray0["kz"] = np.array(InitialConditions)[:, 5]
 
-    Ray0['ex'] = np.array(InitialConditions)[:, 6]
-    Ray0['ey'] = np.array(InitialConditions)[:, 7]
-    Ray0['ez'] = np.array(InitialConditions)[:, 8]
+    Ray0["ex"] = np.array(InitialConditions)[:, 6]
+    Ray0["ey"] = np.array(InitialConditions)[:, 7]
+    Ray0["ez"] = np.array(InitialConditions)[:, 8]
 
-    Ray0['er'] = e0_spherical[:, 0]
-    Ray0['et'] = e0_spherical[:, 1]
-    Ray0['ep'] = e0_spherical[:, 2]
+    Ray0["er"] = e0_spherical[:, 0]
+    Ray0["et"] = e0_spherical[:, 1]
+    Ray0["ep"] = e0_spherical[:, 2]
 
-    Ray0['K'] = np.column_stack([Ray0['kx'], Ray0['ky'], Ray0['kz']])
+    Ray0["K"] = np.column_stack([Ray0["kx"], Ray0["ky"], Ray0["kz"]])
 
-    Ray0['e0'] = np.column_stack([Ray0['ex'], Ray0['ey'], Ray0['ez']])
-    Ray0['e0_spherical'] = np.column_stack(
-        [Ray0['er'], Ray0['et'], Ray0['ep']])
+    Ray0["e0"] = np.column_stack([Ray0["ex"], Ray0["ey"], Ray0["ez"]])
+    Ray0["e0_spherical"] = np.column_stack([Ray0["er"], Ray0["et"], Ray0["ep"]])
 
-    Ray0['E0'] = np.column_stack(
-        [(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
+    Ray0["E0"] = np.column_stack([(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
 
-    Ray0['E0x'] = E0_rho[:, 0]
-    Ray0['E0y'] = E0_rho[:, 1]
-    Ray0['E0z'] = E0_rho[:, 2]
+    Ray0["E0x"] = E0_rho[:, 0]
+    Ray0["E0y"] = E0_rho[:, 1]
+    Ray0["E0z"] = E0_rho[:, 2]
 
-    Ray0['E0r'] = E0_sperical[:, 0]
-    Ray0['E0t'] = E0_sperical[:, 1]
-    Ray0['E0p'] = E0_sperical[:, 2]
+    Ray0["E0r"] = E0_sperical[:, 0]
+    Ray0["E0t"] = E0_sperical[:, 1]
+    Ray0["E0p"] = E0_sperical[:, 2]
 
-    Ray0['|E0|'] = np.sqrt(Ray0['E0x']**2+Ray0['E0y']**2+Ray0['E0z']**2)
+    Ray0["|E0|"] = np.sqrt(Ray0["E0x"] ** 2 + Ray0["E0y"] ** 2 + Ray0["E0z"] ** 2)
 
-    Ray0['E0_spherical'] = np.column_stack(
-        [Ray0['E0r'], Ray0['E0t'], Ray0['E0p']])
+    Ray0["E0_spherical"] = np.column_stack([Ray0["E0r"], Ray0["E0t"], Ray0["E0p"]])
 
     RayTube0 = pv.PolyData(np.array(InitialConditions)[:, 0:3], cells)
 
-    totTubes = cells.shape[0]//4
+    totTubes = cells.shape[0] // 4
 
     e0_tube = []
     e0_tube_spherical = []
@@ -930,15 +949,13 @@ def PlaneWaveSquare(size, K, a_location, E0_amplitude, nDivisionSource, iPol):
 
     zversor = np.array([0, 0, 1])
     rVersor_cell = -RayTube0.face_normals
-    RayTubes0 = RayTube0.compute_cell_sizes(
-        length=False, area=True, volume=False)
+    RayTubes0 = RayTube0.compute_cell_sizes(length=False, area=True, volume=False)
 
     for nTubes in range(totTubes):
 
-        ATube0.append(RayTubes0['Area'][nTubes])
+        ATube0.append(RayTubes0["Area"][nTubes])
 
-        _, theta, phi = Functions.Cart2sphere(
-            Normal[0], Normal[1], Normal[2])
+        _, theta, phi = Functions.Cart2sphere(Normal[0], Normal[1], Normal[2])
 
         thetaTube.append(theta)
         phiTube.append(phi)
@@ -948,35 +965,28 @@ def PlaneWaveSquare(size, K, a_location, E0_amplitude, nDivisionSource, iPol):
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
         if iPol == 1:
-            e = np.array([np.cos(theta)*np.cos(phi),
-                          np.cos(theta) * np.sin(phi),
-                          -np.sin(theta)])
+            e = np.array([np.cos(theta) * np.cos(phi), np.cos(theta) * np.sin(phi), -np.sin(theta)])
         else:
 
-            e = np.array([-np.sin(phi),
-                          np.cos(phi),
-                          0])
+            e = np.array([-np.sin(phi), np.cos(phi), 0])
 
-        e_spherical = np.array([np.dot(e, r_versor), np.dot(
-            e, theta_versor), np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0_tube.append(e)
         e0_tube_spherical.append(e_spherical)
 
         Edir = e
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
         E0_tube.append(E0_amplitude * Edir)
 
-        E0_tube_spherical.append(E0_amplitude*Edir_spherical)
+        E0_tube_spherical.append(E0_amplitude * Edir_spherical)
 
     e0_tube = np.array(e0_tube)
     e0_tube_spherical = np.array(e0_tube_spherical)
@@ -986,46 +996,45 @@ def PlaneWaveSquare(size, K, a_location, E0_amplitude, nDivisionSource, iPol):
     thetaTube = np.array(thetaTube)
     phiTube = np.array(phiTube)
 
-    RayTube0.cell_data['kx'] = rVersor_cell[:, 0]
-    RayTube0.cell_data['ky'] = rVersor_cell[:, 1]
-    RayTube0.cell_data['kz'] = rVersor_cell[:, 2]
+    RayTube0.cell_data["kx"] = rVersor_cell[:, 0]
+    RayTube0.cell_data["ky"] = rVersor_cell[:, 1]
+    RayTube0.cell_data["kz"] = rVersor_cell[:, 2]
 
-    RayTube0.cell_data['ex'] = e0_tube[:, 0]
-    RayTube0.cell_data['ey'] = e0_tube[:, 1]
-    RayTube0.cell_data['ez'] = e0_tube[:, 2]
+    RayTube0.cell_data["ex"] = e0_tube[:, 0]
+    RayTube0.cell_data["ey"] = e0_tube[:, 1]
+    RayTube0.cell_data["ez"] = e0_tube[:, 2]
 
-    RayTube0.cell_data['er'] = e0_tube_spherical[:, 0]
-    RayTube0.cell_data['et'] = e0_tube_spherical[:, 1]
-    RayTube0.cell_data['ep'] = e0_tube_spherical[:, 2]
+    RayTube0.cell_data["er"] = e0_tube_spherical[:, 0]
+    RayTube0.cell_data["et"] = e0_tube_spherical[:, 1]
+    RayTube0.cell_data["ep"] = e0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['E0x'] = E0_tube[:, 0]
-    RayTube0.cell_data['E0y'] = E0_tube[:, 1]
-    RayTube0.cell_data['E0z'] = E0_tube[:, 2]
+    RayTube0.cell_data["E0x"] = E0_tube[:, 0]
+    RayTube0.cell_data["E0y"] = E0_tube[:, 1]
+    RayTube0.cell_data["E0z"] = E0_tube[:, 2]
 
-    RayTube0.cell_data['E0r'] = E0_tube_spherical[:, 0]
-    RayTube0.cell_data['E0t'] = E0_tube_spherical[:, 1]
-    RayTube0.cell_data['E0p'] = E0_tube_spherical[:, 2]
+    RayTube0.cell_data["E0r"] = E0_tube_spherical[:, 0]
+    RayTube0.cell_data["E0t"] = E0_tube_spherical[:, 1]
+    RayTube0.cell_data["E0p"] = E0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['K'] = np.column_stack(
-        [RayTube0['kx'], RayTube0['ky'], RayTube0['kz']])
+    RayTube0.cell_data["K"] = np.column_stack([RayTube0["kx"], RayTube0["ky"], RayTube0["kz"]])
 
-    RayTube0.cell_data['e0'] = np.column_stack(
-        [RayTube0['ex'], RayTube0['ey'], RayTube0['ez']])
-    RayTube0.cell_data['e0_spherical'] = np.column_stack(
-        [RayTube0['er'], RayTube0['et'], RayTube0['ep']])
+    RayTube0.cell_data["e0"] = np.column_stack([RayTube0["ex"], RayTube0["ey"], RayTube0["ez"]])
+    RayTube0.cell_data["e0_spherical"] = np.column_stack([RayTube0["er"], RayTube0["et"], RayTube0["ep"]])
 
-    RayTube0.cell_data['E0'] = np.column_stack(
-        [RayTube0.cell_data['E0x'], RayTube0.cell_data['E0y'], RayTube0.cell_data['E0z']])
+    RayTube0.cell_data["E0"] = np.column_stack(
+        [RayTube0.cell_data["E0x"], RayTube0.cell_data["E0y"], RayTube0.cell_data["E0z"]]
+    )
 
-    RayTube0.cell_data['E0_spherical'] = np.column_stack(
-        [RayTube0.cell_data['E0r'], RayTube0.cell_data['E0t'], RayTube0.cell_data['E0p']])
+    RayTube0.cell_data["E0_spherical"] = np.column_stack(
+        [RayTube0.cell_data["E0r"], RayTube0.cell_data["E0t"], RayTube0.cell_data["E0p"]]
+    )
 
-    RayTube0.cell_data['|E0|'] = np.sqrt(
-        RayTube0['E0x']**2+RayTube0['E0y']**2+RayTube0['E0z']**2)
+    RayTube0.cell_data["|E0|"] = np.sqrt(RayTube0["E0x"] ** 2 + RayTube0["E0y"] ** 2 + RayTube0["E0z"] ** 2)
 
-    RayTube0.cell_data['Area'] = ATube0
+    RayTube0.cell_data["Area"] = ATube0
 
     return InitialConditions, Ray0, RayTube0
+
 
 ###################################################################
 
@@ -1046,14 +1055,13 @@ def PlaneWaveDisk(Radius, K, a_location, E0_amplitude, nDivisionSource, iPol):
     pointsArray[:, 0:2] = points
     pointsArray[:, 2] = 0
 
-    arrayNodeMap = np.zeros(shape=(cells.shape[0], 4), dtype='<i4')
+    arrayNodeMap = np.zeros(shape=(cells.shape[0], 4), dtype="<i4")
     arrayNodeMap[:, 0] = 3
     arrayNodeMap[:, 1:4] = cells
 
     Disk = pv.PolyData(pointsArray, arrayNodeMap.ravel())
 
-    Disk = Disk.translate(
-        (a_location[0], a_location[1], a_location[2]), inplace=True)
+    Disk = Disk.translate((a_location[0], a_location[1], a_location[2]), inplace=True)
 
     points = Disk.points
 
@@ -1065,54 +1073,46 @@ def PlaneWaveDisk(Radius, K, a_location, E0_amplitude, nDivisionSource, iPol):
 
     for nRay in range(totRay):
 
-        _, theta, phi = Functions.Cart2sphere(
-            Normal[0], Normal[1], Normal[2])
+        _, theta, phi = Functions.Cart2sphere(Normal[0], Normal[1], Normal[2])
 
         st = np.sin(theta)
         ct = np.cos(theta)
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
         n0 = 1
 
-        RayDir1 = r_versor[0]*n0
-        RayDir2 = r_versor[1]*n0
-        RayDir3 = r_versor[2]*n0
+        RayDir1 = r_versor[0] * n0
+        RayDir2 = r_versor[1] * n0
+        RayDir3 = r_versor[2] * n0
 
         if iPol == 1:
-            e = np.array([np.cos(theta)*np.cos(phi),
-                          np.cos(theta) * np.sin(phi),
-                          -np.sin(theta)])
+            e = np.array([np.cos(theta) * np.cos(phi), np.cos(theta) * np.sin(phi), -np.sin(theta)])
         else:
 
-            e = np.array([-np.sin(phi),
-                          np.cos(phi),
-                          0])
+            e = np.array([-np.sin(phi), np.cos(phi), 0])
 
-        e_spherical = np.array([np.dot(e, r_versor),
-                                np.dot(e, theta_versor),
-                                np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0.append(e)
         e0_spherical.append(e_spherical)
 
         Edir = e
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
-        E0_rho.append(E0_amplitude*Edir)
+        E0_rho.append(E0_amplitude * Edir)
         # E0_rho.append(E0_amplitude*e0*np.exp(1j*k*rho))
 
-        E0_sperical.append(E0_amplitude*Edir_spherical)
+        E0_sperical.append(E0_amplitude * Edir_spherical)
 
-        InitialConditions.append([points[nRay][0], points[nRay][1], points[nRay][2], RayDir1,
-                                  RayDir2, RayDir3, e[0], e[1], e[2], 0, 0])     # Change these initial conditions
+        InitialConditions.append(
+            [points[nRay][0], points[nRay][1], points[nRay][2], RayDir1, RayDir2, RayDir3, e[0], e[1], e[2], 0, 0]
+        )  # Change these initial conditions
 
     E0_rho = np.array(E0_rho)
     e0 = np.array(e0)
@@ -1121,43 +1121,40 @@ def PlaneWaveDisk(Radius, K, a_location, E0_amplitude, nDivisionSource, iPol):
 
     Ray0 = pv.PolyData(np.array(InitialConditions)[:, 0:3])
 
-    Ray0['kx'] = np.array(InitialConditions)[:, 3]
-    Ray0['ky'] = np.array(InitialConditions)[:, 4]
-    Ray0['kz'] = np.array(InitialConditions)[:, 5]
+    Ray0["kx"] = np.array(InitialConditions)[:, 3]
+    Ray0["ky"] = np.array(InitialConditions)[:, 4]
+    Ray0["kz"] = np.array(InitialConditions)[:, 5]
 
-    Ray0['ex'] = np.array(InitialConditions)[:, 6]
-    Ray0['ey'] = np.array(InitialConditions)[:, 7]
-    Ray0['ez'] = np.array(InitialConditions)[:, 8]
+    Ray0["ex"] = np.array(InitialConditions)[:, 6]
+    Ray0["ey"] = np.array(InitialConditions)[:, 7]
+    Ray0["ez"] = np.array(InitialConditions)[:, 8]
 
-    Ray0['er'] = e0_spherical[:, 0]
-    Ray0['et'] = e0_spherical[:, 1]
-    Ray0['ep'] = e0_spherical[:, 2]
+    Ray0["er"] = e0_spherical[:, 0]
+    Ray0["et"] = e0_spherical[:, 1]
+    Ray0["ep"] = e0_spherical[:, 2]
 
-    Ray0['K'] = np.column_stack([Ray0['kx'], Ray0['ky'], Ray0['kz']])
+    Ray0["K"] = np.column_stack([Ray0["kx"], Ray0["ky"], Ray0["kz"]])
 
-    Ray0['e0'] = np.column_stack([Ray0['ex'], Ray0['ey'], Ray0['ez']])
-    Ray0['e0_spherical'] = np.column_stack(
-        [Ray0['er'], Ray0['et'], Ray0['ep']])
+    Ray0["e0"] = np.column_stack([Ray0["ex"], Ray0["ey"], Ray0["ez"]])
+    Ray0["e0_spherical"] = np.column_stack([Ray0["er"], Ray0["et"], Ray0["ep"]])
 
-    Ray0['E0'] = np.column_stack(
-        [(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
+    Ray0["E0"] = np.column_stack([(E0_rho[:, 0]), (E0_rho[:, 1]), (E0_rho[:, 2])])
 
-    Ray0['E0x'] = E0_rho[:, 0]
-    Ray0['E0y'] = E0_rho[:, 1]
-    Ray0['E0z'] = E0_rho[:, 2]
+    Ray0["E0x"] = E0_rho[:, 0]
+    Ray0["E0y"] = E0_rho[:, 1]
+    Ray0["E0z"] = E0_rho[:, 2]
 
-    Ray0['E0r'] = E0_sperical[:, 0]
-    Ray0['E0t'] = E0_sperical[:, 1]
-    Ray0['E0p'] = E0_sperical[:, 2]
+    Ray0["E0r"] = E0_sperical[:, 0]
+    Ray0["E0t"] = E0_sperical[:, 1]
+    Ray0["E0p"] = E0_sperical[:, 2]
 
-    Ray0['|E0|'] = np.sqrt(Ray0['E0x']**2+Ray0['E0y']**2+Ray0['E0z']**2)
+    Ray0["|E0|"] = np.sqrt(Ray0["E0x"] ** 2 + Ray0["E0y"] ** 2 + Ray0["E0z"] ** 2)
 
-    Ray0['E0_spherical'] = np.column_stack(
-        [Ray0['E0r'], Ray0['E0t'], Ray0['E0p']])
+    Ray0["E0_spherical"] = np.column_stack([Ray0["E0r"], Ray0["E0t"], Ray0["E0p"]])
 
     RayTube0 = pv.PolyData(np.array(InitialConditions)[:, 0:3], cells)
 
-    totTubes = cells.shape[0]//4
+    totTubes = cells.shape[0] // 4
 
     e0_tube = []
     e0_tube_spherical = []
@@ -1169,15 +1166,13 @@ def PlaneWaveDisk(Radius, K, a_location, E0_amplitude, nDivisionSource, iPol):
 
     zversor = np.array([0, 0, 1])
     rVersor_cell = -RayTube0.face_normals
-    RayTubes0 = RayTube0.compute_cell_sizes(
-        length=False, area=True, volume=False)
+    RayTubes0 = RayTube0.compute_cell_sizes(length=False, area=True, volume=False)
 
     for nTubes in range(totTubes):
 
-        ATube0.append(RayTubes0['Area'][nTubes])
+        ATube0.append(RayTubes0["Area"][nTubes])
 
-        _, theta, phi = Functions.Cart2sphere(
-            Normal[0], Normal[1], Normal[2])
+        _, theta, phi = Functions.Cart2sphere(Normal[0], Normal[1], Normal[2])
 
         thetaTube.append(theta)
         phiTube.append(phi)
@@ -1187,35 +1182,28 @@ def PlaneWaveDisk(Radius, K, a_location, E0_amplitude, nDivisionSource, iPol):
         cp = np.cos(phi)
         sp = np.sin(phi)
 
-        r_versor = np.array([st*cp, st*sp, ct])
-        theta_versor = np.array([ct*cp, ct*sp, -st])
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
         phi_versor = np.array([-sp, cp, 0])
 
         if iPol == 1:
-            e = np.array([np.cos(theta)*np.cos(phi),
-                          np.cos(theta) * np.sin(phi),
-                          -np.sin(theta)])
+            e = np.array([np.cos(theta) * np.cos(phi), np.cos(theta) * np.sin(phi), -np.sin(theta)])
         else:
 
-            e = np.array([-np.sin(phi),
-                          np.cos(phi),
-                          0])
+            e = np.array([-np.sin(phi), np.cos(phi), 0])
 
-        e_spherical = np.array([np.dot(e, r_versor), np.dot(
-            e, theta_versor), np.dot(e, phi_versor)])
+        e_spherical = np.array([np.dot(e, r_versor), np.dot(e, theta_versor), np.dot(e, phi_versor)])
 
         e0_tube.append(e)
         e0_tube_spherical.append(e_spherical)
 
         Edir = e
 
-        Edir_spherical = np.array([np.dot(Edir, r_versor),
-                                   np.dot(Edir, theta_versor),
-                                   np.dot(Edir, phi_versor)])
+        Edir_spherical = np.array([np.dot(Edir, r_versor), np.dot(Edir, theta_versor), np.dot(Edir, phi_versor)])
 
         E0_tube.append(E0_amplitude * Edir)
 
-        E0_tube_spherical.append(E0_amplitude*Edir_spherical)
+        E0_tube_spherical.append(E0_amplitude * Edir_spherical)
 
     e0_tube = np.array(e0_tube)
     e0_tube_spherical = np.array(e0_tube_spherical)
@@ -1225,43 +1213,41 @@ def PlaneWaveDisk(Radius, K, a_location, E0_amplitude, nDivisionSource, iPol):
     thetaTube = np.array(thetaTube)
     phiTube = np.array(phiTube)
 
-    RayTube0.cell_data['kx'] = rVersor_cell[:, 0]
-    RayTube0.cell_data['ky'] = rVersor_cell[:, 1]
-    RayTube0.cell_data['kz'] = rVersor_cell[:, 2]
+    RayTube0.cell_data["kx"] = rVersor_cell[:, 0]
+    RayTube0.cell_data["ky"] = rVersor_cell[:, 1]
+    RayTube0.cell_data["kz"] = rVersor_cell[:, 2]
 
-    RayTube0.cell_data['ex'] = e0_tube[:, 0]
-    RayTube0.cell_data['ey'] = e0_tube[:, 1]
-    RayTube0.cell_data['ez'] = e0_tube[:, 2]
+    RayTube0.cell_data["ex"] = e0_tube[:, 0]
+    RayTube0.cell_data["ey"] = e0_tube[:, 1]
+    RayTube0.cell_data["ez"] = e0_tube[:, 2]
 
-    RayTube0.cell_data['er'] = e0_tube_spherical[:, 0]
-    RayTube0.cell_data['et'] = e0_tube_spherical[:, 1]
-    RayTube0.cell_data['ep'] = e0_tube_spherical[:, 2]
+    RayTube0.cell_data["er"] = e0_tube_spherical[:, 0]
+    RayTube0.cell_data["et"] = e0_tube_spherical[:, 1]
+    RayTube0.cell_data["ep"] = e0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['E0x'] = E0_tube[:, 0]
-    RayTube0.cell_data['E0y'] = E0_tube[:, 1]
-    RayTube0.cell_data['E0z'] = E0_tube[:, 2]
+    RayTube0.cell_data["E0x"] = E0_tube[:, 0]
+    RayTube0.cell_data["E0y"] = E0_tube[:, 1]
+    RayTube0.cell_data["E0z"] = E0_tube[:, 2]
 
-    RayTube0.cell_data['E0r'] = E0_tube_spherical[:, 0]
-    RayTube0.cell_data['E0t'] = E0_tube_spherical[:, 1]
-    RayTube0.cell_data['E0p'] = E0_tube_spherical[:, 2]
+    RayTube0.cell_data["E0r"] = E0_tube_spherical[:, 0]
+    RayTube0.cell_data["E0t"] = E0_tube_spherical[:, 1]
+    RayTube0.cell_data["E0p"] = E0_tube_spherical[:, 2]
 
-    RayTube0.cell_data['K'] = np.column_stack(
-        [RayTube0['kx'], RayTube0['ky'], RayTube0['kz']])
+    RayTube0.cell_data["K"] = np.column_stack([RayTube0["kx"], RayTube0["ky"], RayTube0["kz"]])
 
-    RayTube0.cell_data['e0'] = np.column_stack(
-        [RayTube0['ex'], RayTube0['ey'], RayTube0['ez']])
-    RayTube0.cell_data['e0_spherical'] = np.column_stack(
-        [RayTube0['er'], RayTube0['et'], RayTube0['ep']])
+    RayTube0.cell_data["e0"] = np.column_stack([RayTube0["ex"], RayTube0["ey"], RayTube0["ez"]])
+    RayTube0.cell_data["e0_spherical"] = np.column_stack([RayTube0["er"], RayTube0["et"], RayTube0["ep"]])
 
-    RayTube0.cell_data['E0'] = np.column_stack(
-        [RayTube0.cell_data['E0x'], RayTube0.cell_data['E0y'], RayTube0.cell_data['E0z']])
+    RayTube0.cell_data["E0"] = np.column_stack(
+        [RayTube0.cell_data["E0x"], RayTube0.cell_data["E0y"], RayTube0.cell_data["E0z"]]
+    )
 
-    RayTube0.cell_data['E0_spherical'] = np.column_stack(
-        [RayTube0.cell_data['E0r'], RayTube0.cell_data['E0t'], RayTube0.cell_data['E0p']])
+    RayTube0.cell_data["E0_spherical"] = np.column_stack(
+        [RayTube0.cell_data["E0r"], RayTube0.cell_data["E0t"], RayTube0.cell_data["E0p"]]
+    )
 
-    RayTube0.cell_data['|E0|'] = np.sqrt(
-        RayTube0['E0x']**2+RayTube0['E0y']**2+RayTube0['E0z']**2)
+    RayTube0.cell_data["|E0|"] = np.sqrt(RayTube0["E0x"] ** 2 + RayTube0["E0y"] ** 2 + RayTube0["E0z"] ** 2)
 
-    RayTube0.cell_data['Area'] = ATube0
+    RayTube0.cell_data["Area"] = ATube0
 
     return InitialConditions, Ray0, RayTube0
