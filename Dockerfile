@@ -19,7 +19,8 @@ RUN pip install --no-cache-dir \
     pyvista \
     tqdm \
     joblib \
-    p-tqdm
+    p-tqdm \
+    pyacvd
 
 # Set default command
 CMD ["python", "main.py"]
