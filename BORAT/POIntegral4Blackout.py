@@ -55,7 +55,7 @@ Aperture Integration with Kim
 
 def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, rho):
 
-    totalTubes = RayTubes.n_faces
+    totalTubes = RayTubes.n_cells
 
     vind = np.zeros(shape=(totalTubes, 3), dtype='int')
     beta = np.zeros(totalTubes)
@@ -281,7 +281,7 @@ def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, ps
 
 def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, rho):
 
-    totalTubes = RayTubes.n_faces
+    totalTubes = RayTubes.n_cells
 
     _lambda = 2*np.pi/k
 
@@ -479,7 +479,7 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
 
 def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, rho):
 
-    totalTubes = RayTubes.n_faces
+    totalTubes = RayTubes.n_cells
 
     _lambda = 2*np.pi/k
 

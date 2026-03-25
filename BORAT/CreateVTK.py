@@ -170,7 +170,7 @@ def CompleteRay(RaySolutions, Ray0, rho):
 
 def FinalTubes(RaySolutions,RayTube0,rho):
     
-    totalTubes = RayTube0.n_faces
+    totalTubes = RayTube0.n_cells
     
     # quantities to be calculated for the tubes
     TubesFinalArea = np.zeros(totalTubes)

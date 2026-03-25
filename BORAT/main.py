@@ -144,7 +144,7 @@ if __name__ == "__main__":
     ##############################
 
     totalRay = Ray0.n_points
-    print("Antenna modeling:", totalRay, "Rays,", RayTube0.n_faces, "Tubes")
+    print("Antenna modeling:", totalRay, "Rays,", RayTube0.n_cells, "Tubes")
 
     if Solver.Parallel:
         print("Parallel Simulation")
