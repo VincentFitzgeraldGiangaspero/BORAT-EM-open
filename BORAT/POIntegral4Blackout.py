@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 
 # constants
 epsilon0 = 8.85e-12  # permittivity of free space
-rad = np.pi/180   # radiants conversion
+rad = np.pi / 180  # radiants conversion
 c = 299792458.0  # Speed of light in m/s
 
 # region
@@ -34,6 +34,7 @@ def read_model_coordinates(points):
     nverts = len(xpts)
     return xpts, ypts, zpts, nverts
 
+
 ###################################################################
 
 
@@ -42,6 +43,7 @@ def generate_transpose_matrix(facets):
     node2 = facets[:, 1]
     node3 = facets[:, 2]
     return node1, node2, node3
+
 
 ###################################################################
 # endregion
@@ -57,7 +59,7 @@ def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, ps
 
     totalTubes = RayTubes.n_cells
 
-    vind = np.zeros(shape=(totalTubes, 3), dtype='int')
+    vind = np.zeros(shape=(totalTubes, 3), dtype="int")
     beta = np.zeros(totalTubes)
     alpha = np.zeros(totalTubes)
 
@@ -67,7 +69,7 @@ def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, ps
     modE = np.zeros(totalTubes)
     Phase = np.zeros(totalTubes)
 
-    AthetaDebug = np.zeros(totalTubes,dtype=complex)
+    AthetaDebug = np.zeros(totalTubes, dtype=complex)
     AphiDebug = np.zeros(totalTubes, dtype=complex)
     ShapeDebug = np.zeros(totalTubes, dtype=complex)
 
@@ -75,15 +77,15 @@ def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, ps
     # Set up observation angles
 
     if tstart_obs == tstop_obs:
-        thr0 = tstart_obs*rad
+        thr0 = tstart_obs * rad
 
     if pstart_obs == pstop_obs:
-        phr0 = pstart_obs*rad
+        phr0 = pstart_obs * rad
 
     # steps in theta and in phi for the observation direction
 
-    it = math.floor((tstop_obs-tstart_obs)/delt) + 1
-    ip = math.floor((pstop_obs-pstart_obs)/delp) + 1
+    it = math.floor((tstop_obs - tstart_obs) / delt) + 1
+    ip = math.floor((pstop_obs - pstart_obs) / delp) + 1
 
     phi = np.zeros(shape=(ip, it))
     theta = np.zeros(shape=(ip, it))
@@ -92,13 +94,12 @@ def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, ps
     # Tubes quantities
 
     xiyizi = RayTubes.cell_centers()
-    Normal = RayTubes['Normal']
-    Area = RayTubes['Area']
+    Normal = RayTubes["Normal"]
+    Area = RayTubes["Area"]
 
     xpts, ypts, zpts, nverts = read_model_coordinates(RayTubes.points)
 
-    node1, node2, node3 = generate_transpose_matrix(
-        RayTubes.faces.reshape(len(RayTubes.faces)//4, 4)[:, 1:4])
+    node1, node2, node3 = generate_transpose_matrix(RayTubes.faces.reshape(len(RayTubes.faces) // 4, 4)[:, 1:4])
 
     for i in range(totalTubes):
         pts = np.array([node1[i], node2[i], node3[i]])
@@ -110,11 +111,11 @@ def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, ps
 
     for i in range(totalTubes):
 
-        """ 
+        """
         turn polydata normals if K*N is negative (inward-outward)
         """
 
-        dot = np.dot(Normal[i], RayTubes['K'][i])
+        dot = np.dot(Normal[i], RayTubes["K"][i])
         if dot < 0:
             Normal[i] = -Normal[i]
 
@@ -124,26 +125,26 @@ def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, ps
     ############################
     # EM field quantities
 
-    Z0 = 1/(epsilon0*c)
+    Z0 = 1 / (epsilon0 * c)
 
     for m in range(totalTubes):
 
-        ki[:, m] = RayTubes['K'][m]
+        ki[:, m] = RayTubes["K"][m]
         # modE[m] = RayTubes['|E|'][m]
-        Phase[m] = RayTubes['phase'][m]
+        Phase[m] = RayTubes["phase"][m]
 
         # we are transforming in complex vector
-        Efield[:, m] = RayTubes['Efield'][m]
+        Efield[:, m] = RayTubes["Efield"][m]
 
-        Efield[np.isnan(Efield[:, m]),m]=0
-        Efield[np.isinf(Efield[:, m]),m]=0
-        
-        Hfield[:, m] = 1/Z0 * np.cross(ki[:, m], Efield[:, m])
+        Efield[np.isnan(Efield[:, m]), m] = 0
+        Efield[np.isinf(Efield[:, m]), m] = 0
+
+        Hfield[:, m] = 1 / Z0 * np.cross(ki[:, m], Efield[:, m])
 
     ############################
     # Start of angles Loop
 
-    totSteps = it*ip
+    totSteps = it * ip
     counterSteps = 0
 
     EScat = np.zeros(shape=(2, ip, it), dtype=complex)
@@ -151,124 +152,119 @@ def ApertureIntegrationKim(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, ps
     # for i1 in tqdm(range(ip)):
 
     #     for i2 in tqdm(range(it)):
-    
+
     for i1, i2 in tqdm(itertools.product(range(ip), range(it)), total=ip * it, desc="Processing", leave=True):
 
-            counterSteps = counterSteps + 1
+        counterSteps = counterSteps + 1
 
-            phi[i1, i2] = pstart_obs + i1 * delp
-            theta[i1, i2] = tstart_obs + i2 * delt
+        phi[i1, i2] = pstart_obs + i1 * delp
+        theta[i1, i2] = tstart_obs + i2 * delt
 
-            phr = phi[i1, i2] * rad
-            thr = theta[i1, i2] * rad
+        phr = phi[i1, i2] * rad
+        thr = theta[i1, i2] * rad
 
-            # print('*** step = ', counterSteps, ' / ', totSteps,
-            #       ' -- (Theta : ', theta[i1, i2], ' Phy : ', phi[i1, i2], ') \n')
+        # print('*** step = ', counterSteps, ' / ', totSteps,
+        #       ' -- (Theta : ', theta[i1, i2], ' Phy : ', phi[i1, i2], ') \n')
 
-            st = math.sin(thr)
-            ct = math.cos(thr)
-            cp = math.cos(phr)
-            sp = math.sin(phr)
+        st = math.sin(thr)
+        ct = math.cos(thr)
+        cp = math.cos(phr)
+        sp = math.sin(phr)
 
-            # observation direction
-            r_versor = np.array([st*cp, st*sp, ct])
-            theta_versor = np.array([ct*cp, ct*sp, -st])
-            phi_versor = np.array([-sp, cp, 0])
+        # observation direction
+        r_versor = np.array([st * cp, st * sp, ct])
+        theta_versor = np.array([ct * cp, ct * sp, -st])
+        phi_versor = np.array([-sp, cp, 0])
 
-            theta_versor = -theta_versor
-            phi_versor = -phi_versor
+        theta_versor = -theta_versor
+        phi_versor = -phi_versor
 
-            # r versor components
-            u = st*cp
-            v = st*sp
-            w = ct
+        # r versor components
+        u = st * cp
+        v = st * sp
+        w = ct
 
-            # theta versor components
-            uu = ct*cp
-            vv = ct*sp
-            ww = -st
+        # theta versor components
+        uu = ct * cp
+        vv = ct * sp
+        ww = -st
 
-            # Transformation matrix
-            Tspherical = [[st*cp, st*sp, ct],
-                          [ct*cp, ct*sp, -st],
-                          [-sp, cp, 0]]
+        # Transformation matrix
+        Tspherical = [[st * cp, st * sp, ct], [ct * cp, ct * sp, -st], [-sp, cp, 0]]
 
-            # observation direction
-            R_obs = np.array([u, v, w])
+        # observation direction
+        R_obs = np.array([u, v, w])
 
-            sumAtheta = 0
-            sumAphi = 0
+        sumAtheta = 0
+        sumAphi = 0
 
-            ############################
-            """
+        ############################
+        """
             #Tubes Aperture
             """
 
-            for iTube in range(totalTubes):
+        for iTube in range(totalTubes):
 
-                _xiyizi = xiyizi.points[iTube]
-                _ki = ki[:, iTube]
-                _Efield = Efield[:, iTube]
-                _Phase = Phase[iTube]
-                _modE = modE[iTube]
-                _Normal = Normal[iTube, :]
-                _vind = vind[iTube, :]
-                _Area = Area[iTube]
+            _xiyizi = xiyizi.points[iTube]
+            _ki = ki[:, iTube]
+            _Efield = Efield[:, iTube]
+            _Phase = Phase[iTube]
+            _modE = modE[iTube]
+            _Normal = Normal[iTube, :]
+            _vind = vind[iTube, :]
+            _Area = Area[iTube]
 
-                # Tube direction
-                Ri = np.array([_ki[0], _ki[1], _ki[2]])
+            # Tube direction
+            Ri = np.array([_ki[0], _ki[1], _ki[2]])
 
-                Ic = ShapeFactor.GisbonShapeFactorModified(
-                    k, x, y, z, _vind, -Ri, R_obs, _Area, _xiyizi)
-                
-                # Ic = ShapeFactor.GisbonShapeFactor(
-                #     k, x, y, z, _vind, -Ri, R_obs, _Area)
-                
-                _Shape = complex(np.real(Ic), -np.imag(Ic))
-                if np.real(_Shape) == 0:
-                    _Shape
-                    
-                # _Shape = Ic
+            Ic = ShapeFactor.GisbonShapeFactorModified(k, x, y, z, _vind, -Ri, R_obs, _Area, _xiyizi)
 
-                # _Shape = Ic
-                # if _Area == 0:
-                #     _Shape =0
-                # else:
-                #     _Shape=_Shape/_Area
-                radiusTube = np.sqrt(_xiyizi[0]**2+_xiyizi[1]**2+_xiyizi[2]**2)
-                
-                if radiusTube < 14:
-                    _Shape = 0
-                    
-                    
-                _jK4pi = 1j*k/(4*np.pi)
+            # Ic = ShapeFactor.GisbonShapeFactor(
+            #     k, x, y, z, _vind, -Ri, R_obs, _Area)
 
-                _PhaseTerm = np.exp(1j*k*(np.dot(R_obs, _xiyizi)))
+            _Shape = complex(np.real(Ic), -np.imag(Ic))
+            if np.real(_Shape) == 0:
+                _Shape
 
-                _Ei = _Efield*np.exp(-1j*k*_Phase)*np.exp(-1j*k*rho)
+            # _Shape = Ic
 
-                _Hi = np.cross(_ki, _Ei)
+            # _Shape = Ic
+            # if _Area == 0:
+            #     _Shape =0
+            # else:
+            #     _Shape=_Shape/_Area
+            radiusTube = np.sqrt(_xiyizi[0] ** 2 + _xiyizi[1] ** 2 + _xiyizi[2] ** 2)
 
-                _aTheta = np.dot(np.cross(-phi_versor, _Ei) +
-                                 np.cross(theta_versor, _Hi), _Normal)
+            if radiusTube < 14:
+                _Shape = 0
 
-                _aPhi = np.dot(np.cross(theta_versor, _Ei) +
-                               np.cross(phi_versor, _Hi), _Normal)
+            _jK4pi = 1j * k / (4 * np.pi)
 
-                _Atheta = _jK4pi*_PhaseTerm*_aTheta*_Shape
-                _Aphi = _jK4pi*_PhaseTerm*_aPhi*_Shape
+            _PhaseTerm = np.exp(1j * k * (np.dot(R_obs, _xiyizi)))
 
-                sumAtheta = sumAtheta+_Atheta
-                sumAphi = sumAphi+_Aphi
-                
-                ShapeDebug[iTube] = _Shape
-                AthetaDebug[iTube] = _Atheta
-                AphiDebug[iTube] = _Aphi
+            _Ei = _Efield * np.exp(-1j * k * _Phase) * np.exp(-1j * k * rho)
 
-            EScat[0, i1, i2] = sumAtheta
-            EScat[1, i1, i2] = sumAphi
+            _Hi = np.cross(_ki, _Ei)
+
+            _aTheta = np.dot(np.cross(-phi_versor, _Ei) + np.cross(theta_versor, _Hi), _Normal)
+
+            _aPhi = np.dot(np.cross(theta_versor, _Ei) + np.cross(phi_versor, _Hi), _Normal)
+
+            _Atheta = _jK4pi * _PhaseTerm * _aTheta * _Shape
+            _Aphi = _jK4pi * _PhaseTerm * _aPhi * _Shape
+
+            sumAtheta = sumAtheta + _Atheta
+            sumAphi = sumAphi + _Aphi
+
+            ShapeDebug[iTube] = _Shape
+            AthetaDebug[iTube] = _Atheta
+            AphiDebug[iTube] = _Aphi
+
+        EScat[0, i1, i2] = sumAtheta
+        EScat[1, i1, i2] = sumAphi
 
     return EScat, theta, phi
+
 
 # endregion
 
@@ -283,9 +279,9 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
 
     totalTubes = RayTubes.n_cells
 
-    _lambda = 2*np.pi/k
+    _lambda = 2 * np.pi / k
 
-    vind = np.zeros(shape=(totalTubes, 3), dtype='int')
+    vind = np.zeros(shape=(totalTubes, 3), dtype="int")
     beta = np.zeros(totalTubes)
     alpha = np.zeros(totalTubes)
 
@@ -299,15 +295,15 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
     # Set up observation angles
 
     if tstart_obs == tstop_obs:
-        thr0 = tstart_obs*rad
+        thr0 = tstart_obs * rad
 
     if pstart_obs == pstop_obs:
-        phr0 = pstart_obs*rad
+        phr0 = pstart_obs * rad
 
     # steps in theta and in phi for the observation direction
 
-    it = math.floor((tstop_obs-tstart_obs)/delt) + 1
-    ip = math.floor((pstop_obs-pstart_obs)/delp) + 1
+    it = math.floor((tstop_obs - tstart_obs) / delt) + 1
+    ip = math.floor((pstop_obs - pstart_obs) / delp) + 1
 
     phi = np.zeros(shape=(ip, it))
     theta = np.zeros(shape=(ip, it))
@@ -316,13 +312,12 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
     # Tubes quantities
 
     xiyizi = RayTubes.cell_centers()
-    Normal = RayTubes['Normal']
-    Area = RayTubes['Area']
+    Normal = RayTubes["Normal"]
+    Area = RayTubes["Area"]
 
     xpts, ypts, zpts, nverts = read_model_coordinates(RayTubes.points)
 
-    node1, node2, node3 = generate_transpose_matrix(
-        RayTubes.faces.reshape(len(RayTubes.faces)//4, 4)[:, 1:4])
+    node1, node2, node3 = generate_transpose_matrix(RayTubes.faces.reshape(len(RayTubes.faces) // 4, 4)[:, 1:4])
 
     for i in range(totalTubes):
         pts = np.array([node1[i], node2[i], node3[i]])
@@ -334,11 +329,11 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
 
     for i in range(totalTubes):
 
-        """ 
+        """
         turn polydata normals if K*N is negative (inward-outward)
         """
 
-        dot = np.dot(Normal[i], RayTubes['K'][i])
+        dot = np.dot(Normal[i], RayTubes["K"][i])
         if dot < 0:
             Normal[i] = -Normal[i]
 
@@ -348,23 +343,23 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
     ############################
     # EM field quantities
 
-    Z0 = 1/(epsilon0*c)
+    Z0 = 1 / (epsilon0 * c)
 
     for m in range(totalTubes):
 
-        ki[:, m] = RayTubes['K'][m]
+        ki[:, m] = RayTubes["K"][m]
         # modE[m] = RayTubes['|E|'][m]
-        Phase[m] = RayTubes['phase'][m]
+        Phase[m] = RayTubes["phase"][m]
 
         # we are transforming in complex vector
 
-        Efield[:, m] = RayTubes['Efield'][m]
-        Hfield[:, m] = 1/Z0 * np.cross(ki[:, m], Efield[:, m])
+        Efield[:, m] = RayTubes["Efield"][m]
+        Hfield[:, m] = 1 / Z0 * np.cross(ki[:, m], Efield[:, m])
 
     ############################
     # Start of angles Loop
 
-    totSteps = it*ip
+    totSteps = it * ip
     counterSteps = 0
 
     EScat = np.zeros(shape=(2, ip, it), dtype=complex)
@@ -382,8 +377,17 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
             phr = phi[i1, i2] * rad
             thr = theta[i1, i2] * rad
 
-            print('*** step = ', counterSteps, ' / ', totSteps,
-                  ' -- (Theta : ', theta[i1, i2], ' Phy : ', phi[i1, i2], ') \n')
+            print(
+                "*** step = ",
+                counterSteps,
+                " / ",
+                totSteps,
+                " -- (Theta : ",
+                theta[i1, i2],
+                " Phy : ",
+                phi[i1, i2],
+                ") \n",
+            )
 
             st = math.sin(thr)
             ct = math.cos(thr)
@@ -391,27 +395,25 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
             sp = math.sin(phr)
 
             # observation direction
-            r_versor = np.array([st*cp, st*sp, ct])
-            theta_versor = np.array([ct*cp, ct*sp, -st])
+            r_versor = np.array([st * cp, st * sp, ct])
+            theta_versor = np.array([ct * cp, ct * sp, -st])
             phi_versor = np.array([-sp, cp, 0])
 
             theta_versor = -theta_versor
             phi_versor = -phi_versor
 
             # r versor components
-            u = st*cp
-            v = st*sp
+            u = st * cp
+            v = st * sp
             w = ct
 
             # theta versor components
-            uu = ct*cp
-            vv = ct*sp
+            uu = ct * cp
+            vv = ct * sp
             ww = -st
 
             # Transformation matrix
-            Tspherical = [[st*cp, st*sp, ct],
-                          [ct*cp, ct*sp, -st],
-                          [-sp, cp, 0]]
+            Tspherical = [[st * cp, st * sp, ct], [ct * cp, ct * sp, -st], [-sp, cp, 0]]
 
             # observation direction
             R_obs = np.array([u, v, w])
@@ -438,41 +440,39 @@ def RCS(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k, r
                 # Tube direction
                 Ri = np.array([_ki[0], _ki[1], _ki[2]])
 
-                Ic = ShapeFactor.GisbonShapeFactorModified(
-                    k, x, y, z, _vind, -Ri, R_obs, _Area, _xiyizi)
+                Ic = ShapeFactor.GisbonShapeFactorModified(k, x, y, z, _vind, -Ri, R_obs, _Area, _xiyizi)
 
                 _Shape = complex(np.real(Ic), -np.imag(Ic))
 
                 # _Shape=_Shape/_Area
 
-                _jK4pi = 1j*k/(4*np.pi)
+                _jK4pi = 1j * k / (4 * np.pi)
 
-                _PhaseTerm = np.exp(1j*k*(np.dot(R_obs, _xiyizi)))
+                _PhaseTerm = np.exp(1j * k * (np.dot(R_obs, _xiyizi)))
 
-                _Ei = _Efield*np.exp(-1j*k*_Phase)*np.exp(-1j*k*rho)
+                _Ei = _Efield * np.exp(-1j * k * _Phase) * np.exp(-1j * k * rho)
 
                 _Hi = np.cross(_ki, _Ei)
 
-                _aTheta = np.dot(np.cross(-phi_versor, _Ei) +
-                                 np.cross(theta_versor, _Hi), _Normal)
+                _aTheta = np.dot(np.cross(-phi_versor, _Ei) + np.cross(theta_versor, _Hi), _Normal)
 
-                _aPhi = np.dot(np.cross(theta_versor, _Ei) +
-                               np.cross(phi_versor, _Hi), _Normal)
+                _aPhi = np.dot(np.cross(theta_versor, _Ei) + np.cross(phi_versor, _Hi), _Normal)
 
-                _Atheta = _jK4pi*_PhaseTerm*_aTheta*_Shape
-                _Aphi = _jK4pi*_PhaseTerm*_aPhi*_Shape
+                _Atheta = _jK4pi * _PhaseTerm * _aTheta * _Shape
+                _Aphi = _jK4pi * _PhaseTerm * _aPhi * _Shape
 
-                sumAtheta = sumAtheta+_Atheta
-                sumAphi = sumAphi+_Aphi
+                sumAtheta = sumAtheta + _Atheta
+                sumAphi = sumAphi + _Aphi
 
             EScat[0, i1, i2] = sumAtheta
             EScat[1, i1, i2] = sumAphi
-            RCSth[0, i1, i2] = 10*np.log10(4*np.pi*(abs(sumAtheta)**2)+1e-10)
-            RCSth[1, i1, i2] = 10*np.log10(4*np.pi*(abs(sumAphi)**2)+1e-10)
+            RCSth[0, i1, i2] = 10 * np.log10(4 * np.pi * (abs(sumAtheta) ** 2) + 1e-10)
+            RCSth[1, i1, i2] = 10 * np.log10(4 * np.pi * (abs(sumAphi) ** 2) + 1e-10)
             # RCSth[0, i1, i2] = 10*np.log10(abs(sumAtheta)+1e-10)
             # RCSth[1, i1, i2] = 10*np.log10(abs(sumAphi)+1e-10)
 
     return EScat, RCSth, theta, phi
+
 
 ###################################################################
 
@@ -481,9 +481,9 @@ def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k,
 
     totalTubes = RayTubes.n_cells
 
-    _lambda = 2*np.pi/k
+    _lambda = 2 * np.pi / k
 
-    vind = np.zeros(shape=(totalTubes, 3), dtype='int')
+    vind = np.zeros(shape=(totalTubes, 3), dtype="int")
     beta = np.zeros(totalTubes)
     alpha = np.zeros(totalTubes)
 
@@ -497,15 +497,15 @@ def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k,
     # Set up observation angles
 
     if tstart_obs == tstop_obs:
-        thr0 = tstart_obs*rad
+        thr0 = tstart_obs * rad
 
     if pstart_obs == pstop_obs:
-        phr0 = pstart_obs*rad
+        phr0 = pstart_obs * rad
 
     # steps in theta and in phi for the observation direction
 
-    it = math.floor((tstop_obs-tstart_obs)/delt) + 1
-    ip = math.floor((pstop_obs-pstart_obs)/delp) + 1
+    it = math.floor((tstop_obs - tstart_obs) / delt) + 1
+    ip = math.floor((pstop_obs - pstart_obs) / delp) + 1
 
     phi = np.zeros(shape=(ip, it))
     theta = np.zeros(shape=(ip, it))
@@ -514,13 +514,12 @@ def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k,
     # Tubes quantities
 
     xiyizi = RayTubes.cell_centers()
-    Normal = RayTubes['Normal']
-    Area = RayTubes['Area']
+    Normal = RayTubes["Normal"]
+    Area = RayTubes["Area"]
 
     xpts, ypts, zpts, nverts = read_model_coordinates(RayTubes.points)
 
-    node1, node2, node3 = generate_transpose_matrix(
-        RayTubes.faces.reshape(len(RayTubes.faces)//4, 4)[:, 1:4])
+    node1, node2, node3 = generate_transpose_matrix(RayTubes.faces.reshape(len(RayTubes.faces) // 4, 4)[:, 1:4])
 
     for i in range(totalTubes):
         pts = np.array([node1[i], node2[i], node3[i]])
@@ -532,11 +531,11 @@ def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k,
 
     for i in range(totalTubes):
 
-        """ 
+        """
         turn polydata normals if K*N is negative (inward-outward)
         """
 
-        dot = np.dot(Normal[i], RayTubes['K'][i])
+        dot = np.dot(Normal[i], RayTubes["K"][i])
         if dot < 0:
             Normal[i] = -Normal[i]
 
@@ -546,23 +545,23 @@ def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k,
     ############################
     # EM field quantities
 
-    Z0 = 1/(epsilon0*c)
+    Z0 = 1 / (epsilon0 * c)
 
     for m in range(totalTubes):
 
-        ki[:, m] = RayTubes['K'][m]
+        ki[:, m] = RayTubes["K"][m]
         # modE[m] = RayTubes['|E|'][m]
-        Phase[m] = RayTubes['phase'][m]
+        Phase[m] = RayTubes["phase"][m]
 
         # we are transforming in complex vector
 
-        Efield[:, m] = RayTubes['Efield'][m]
-        Hfield[:, m] = 1/Z0 * np.cross(ki[:, m], Efield[:, m])
+        Efield[:, m] = RayTubes["Efield"][m]
+        Hfield[:, m] = 1 / Z0 * np.cross(ki[:, m], Efield[:, m])
 
     ############################
     # Start of angles Loop
 
-    totSteps = it*ip
+    totSteps = it * ip
     counterSteps = 0
 
     EScat = np.zeros(shape=(2, ip, it), dtype=complex)
@@ -580,8 +579,17 @@ def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k,
             phr = phi[i1, i2] * rad
             thr = theta[i1, i2] * rad
 
-            print('*** step = ', counterSteps, ' / ', totSteps,
-                  ' -- (Theta : ', theta[i1, i2], ' Phy : ', phi[i1, i2], ') \n')
+            print(
+                "*** step = ",
+                counterSteps,
+                " / ",
+                totSteps,
+                " -- (Theta : ",
+                theta[i1, i2],
+                " Phy : ",
+                phi[i1, i2],
+                ") \n",
+            )
 
             st = math.sin(thr)
             ct = math.cos(thr)
@@ -589,27 +597,25 @@ def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k,
             sp = math.sin(phr)
 
             # observation direction
-            r_versor = np.array([st*cp, st*sp, ct])
-            theta_versor = np.array([ct*cp, ct*sp, -st])
+            r_versor = np.array([st * cp, st * sp, ct])
+            theta_versor = np.array([ct * cp, ct * sp, -st])
             phi_versor = np.array([-sp, cp, 0])
 
             # theta_versor = -theta_versor
             # phi_versor = -phi_versor
 
             # r versor components
-            u = st*cp
-            v = st*sp
+            u = st * cp
+            v = st * sp
             w = ct
 
             # theta versor components
-            uu = ct*cp
-            vv = ct*sp
+            uu = ct * cp
+            vv = ct * sp
             ww = -st
 
             # Transformation matrix
-            Tspherical = [[st*cp, st*sp, ct],
-                          [ct*cp, ct*sp, -st],
-                          [-sp, cp, 0]]
+            Tspherical = [[st * cp, st * sp, ct], [ct * cp, ct * sp, -st], [-sp, cp, 0]]
 
             # observation direction
             R_obs = np.array([u, v, w])
@@ -636,44 +642,39 @@ def RCSPO(RayTubes, tstart_obs, tstop_obs, delt, pstart_obs, pstop_obs, delp, k,
                 # Tube direction
                 Ri = np.array([_ki[0], _ki[1], _ki[2]])
 
-                Ic = ShapeFactor.GisbonShapeFactorModified(
-                    k, x, y, z, _vind, -Ri, R_obs, _Area, _xiyizi)
+                Ic = ShapeFactor.GisbonShapeFactorModified(k, x, y, z, _vind, -Ri, R_obs, _Area, _xiyizi)
 
                 # Ic= ShapeFactor.GisbonShapeFactor(k, x, y, z, _vind, -Ri, R_obs, _Area)
 
-                radiusTube = np.sqrt(_xiyizi[0]**2+_xiyizi[1]**2+_xiyizi[2]**2)
-                
+                radiusTube = np.sqrt(_xiyizi[0] ** 2 + _xiyizi[1] ** 2 + _xiyizi[2] ** 2)
+
                 if radiusTube < 12:
-                    Ic=0
-                    
-                
+                    Ic = 0
+
                 _Shape = complex(np.real(Ic), -np.imag(Ic))
 
+                _jK4pi = 1j * k / (4 * np.pi)
 
-                _jK4pi = 1j*k/(4*np.pi)
+                _PhaseTerm = np.exp(1j * k * (np.dot(R_obs, _xiyizi)))
 
-                _PhaseTerm = np.exp(1j*k*(np.dot(R_obs, _xiyizi)))
-
-                _Ei = _Efield*np.exp(-1j*k*_Phase)*np.exp(-1j*k*rho)
+                _Ei = _Efield * np.exp(-1j * k * _Phase) * np.exp(-1j * k * rho)
 
                 _Hi = np.cross(_ki, _Ei)
 
-                _aTheta = np.dot(np.cross(-phi_versor, _Ei) +
-                                 np.cross(theta_versor, _Hi), _Normal)
+                _aTheta = np.dot(np.cross(-phi_versor, _Ei) + np.cross(theta_versor, _Hi), _Normal)
 
-                _aPhi = np.dot(np.cross(theta_versor, _Ei) +
-                               np.cross(phi_versor, _Hi), _Normal)
+                _aPhi = np.dot(np.cross(theta_versor, _Ei) + np.cross(phi_versor, _Hi), _Normal)
 
-                _Atheta = _jK4pi*_PhaseTerm*_aTheta*_Shape
-                _Aphi = _jK4pi*_PhaseTerm*_aPhi*_Shape
+                _Atheta = _jK4pi * _PhaseTerm * _aTheta * _Shape
+                _Aphi = _jK4pi * _PhaseTerm * _aPhi * _Shape
 
-                sumAtheta = sumAtheta+_Atheta
-                sumAphi = sumAphi+_Aphi
+                sumAtheta = sumAtheta + _Atheta
+                sumAphi = sumAphi + _Aphi
 
             EScat[0, i1, i2] = sumAtheta
             EScat[1, i1, i2] = sumAphi
-            RCSth[0, i1, i2] = 10*np.log10(4*np.pi*(abs(sumAtheta)**2)+1e-10)
-            RCSth[1, i1, i2] = 10*np.log10(4*np.pi*(abs(sumAphi)**2)+1e-10)
+            RCSth[0, i1, i2] = 10 * np.log10(4 * np.pi * (abs(sumAtheta) ** 2) + 1e-10)
+            RCSth[1, i1, i2] = 10 * np.log10(4 * np.pi * (abs(sumAphi) ** 2) + 1e-10)
             # RCSth[0, i1, i2] = 10*np.log10(4*np.pi*(abs(sumAtheta)**2)/(_lambda**2)+1e-10)
             # RCSth[1, i1, i2] = 10*np.log10(4*np.pi*(abs(sumAphi)**2)/(_lambda**2)+1e-10)
             # RCSth[0, i1, i2] = 10*np.log10(abs(sumAtheta)**2)

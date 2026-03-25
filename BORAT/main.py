@@ -31,7 +31,7 @@ from joblib import Parallel, delayed
 
 
 def EikonalParallel(nRay):
-    y = EikonalSolver.Solve(Solver, BoundarySurfaces, BoundaryPEC, InitialConditions[nRay])
+    y = EikonalSolver.Solve(Solver, InitialConditions[nRay])
     print("Integration finished for Ray n =", nRay)
     return y
 
