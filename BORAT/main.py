@@ -17,6 +17,8 @@ import POPlots
 import ExportTecplot
 import GlobalData
 import POIntegral4Blackout
+import pytecio
+import RefractiveIndex
 
 # Parallelization utilities
 from functools import partial
@@ -36,9 +38,14 @@ def EikonalParallel(nRay):
 
 if __name__ == "__main__":
 
-    ConfigFile = "config/ExoMars.cfg"
+    ConfigFile = "../config/ExoMars.cfg"
 
     Solver = ConfigBorat.Read(ConfigFile)
+
+    # Initialize TecIO library with path from config
+    if Solver.tecioPath:
+        pytecio.initialize_tecio(Solver.tecioPath)
+
     outputFolder = Solver.OutputFolder
     CaseName = Solver.Case
 
@@ -55,23 +62,33 @@ if __name__ == "__main__":
     # Domain setup
     ##############################
 
-    # for tecplot
-    # pvMesh = Domain.create(Solver)
-    # pvMesh.save(outputFolder + 'CFD.vtk')
-    # BoundarySurfaces = pvMesh.extract_surface()
-
     # Load CFD mesh and field data
-    pvMesh = pv.read(Solver.CFDsolution)
+    if Solver.CFDsolution.lower().endswith(".vtk"):
+        pvMesh = pv.read(Solver.CFDsolution)
+    else:
+        # Assume it's a Tecplot file
+        pvMesh = Domain.create(Solver)
+        BoundarySurfaces = pvMesh.extract_surface()
+
     MeshPoints = np.array(pvMesh.points)
 
-    RefractiveIndexArray = np.vstack(
-        [
-            np.array(pvMesh["RefractiveIndex"]),
-            np.array(pvMesh["Gradient X Import"]),
-            np.array(pvMesh["Gradient Y Import"]),
-            np.array(pvMesh["Gradient Z Import"]),
-        ]
-    )
+    # Build RefractiveIndexArray based on configuration
+    if Solver.precomputedRefractive:
+        # Load precomputed refractive index and gradients from mesh
+        RefractiveIndexArray = np.array([np.array(pvMesh[Solver.RefractiveIndex_VarName])])
+
+        if Solver.precomputedGrad:
+            RefractiveIndexArray = np.vstack(
+                [
+                    RefractiveIndexArray,
+                    np.array(pvMesh[Solver.Gradient_X_VarName]),
+                    np.array(pvMesh[Solver.Gradient_Y_VarName]),
+                    np.array(pvMesh[Solver.Gradient_Z_VarName]),
+                ]
+            )
+    else:
+        # Compute refractive index and gradients from CFD data
+        RefractiveIndexArray = RefractiveIndex.compute_refractive_index(pvMesh, Solver)
 
     kdtree = KDTree(MeshPoints)
 

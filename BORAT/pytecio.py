@@ -6,7 +6,35 @@ import os
 
 __version__ = "Version 1"
 
-tecio = ctypes.cdll.LoadLibrary("/home/u0142014/tecplot/360ex_2022r2/bin/libtecio.so")
+# Default library path (can be overridden by initialize_tecio())
+_DEFAULT_TECIO_PATH = "/home/u0142014/tecplot/360ex_2022r2/bin/libtecio.so"
+tecio = None
+
+
+def initialize_tecio(library_path):
+    """Initialize the tecio library with a custom path.
+
+    Args:
+        library_path: Path to the libtecio.so library file
+    """
+    global tecio, GLOBAL_DLL
+    try:
+        tecio = ctypes.cdll.LoadLibrary(library_path)
+        GLOBAL_DLL = tecio
+    except OSError as e:
+        print(f"Warning: Failed to load TecIO library from {library_path}")
+        print(f"Error: {e}")
+        print("TecIO output will be disabled. VTK output will be used instead.")
+        tecio = None
+        GLOBAL_DLL = None
+
+
+# Try to load with default path on import, but don't fail if it doesn't exist
+try:
+    tecio = ctypes.cdll.LoadLibrary(_DEFAULT_TECIO_PATH)
+except OSError:
+    # Will be initialized later via initialize_tecio()
+    pass
 
 ######################################################
 
@@ -40,12 +68,11 @@ Structed_Grid = 0
 
 
 def get_dll():
-    dll_path = "/home/u0142014/tecplot/360ex_2022r2/bin/libtecio.so"
+    """Get the global DLL instance. Returns None if TecIO is not available."""
+    return tecio
 
-    return ctypes.cdll.LoadLibrary(str(dll_path))
 
-
-GLOBAL_DLL = get_dll()
+GLOBAL_DLL = tecio
 
 
 class zone_data(dict):
@@ -843,6 +870,10 @@ def cal_zone(number, g, q):
 
 def open_file(file_name, dataset_title, var_names, file_type=FILETYPE_GRIDANDSOLUTION, grid_file_handle=None):
 
+    if tecio is None:
+        print(f"TecIO not available. Skipping output to {file_name}")
+        return None
+
     tecio.tecFileWriterOpen.restype = ctypes.c_int32
     tecio.tecFileWriterOpen.argtypes = (
         ctypes.c_char_p,
@@ -874,6 +905,9 @@ def open_file(file_name, dataset_title, var_names, file_type=FILETYPE_GRIDANDSOL
 
 
 def close_file(file_handle):
+    if file_handle is None:
+        return
+
     tecio.tecFileWriterClose.restype = ctypes.c_int32
     tecio.tecFileWriterClose.argtypes = (ctypes.POINTER(ctypes.c_void_p),)
 
@@ -883,6 +917,9 @@ def close_file(file_handle):
 
 
 def create_ordered_zone(file_handle, zone_name, shape, var_sharing=None, var_data_types=None, value_locations=None):
+
+    if file_handle is None:
+        return None
 
     tecio.tecZoneCreateIJK.restype = ctypes.c_int32
     tecio.tecZoneCreateIJK.argtypes = (
@@ -934,6 +971,9 @@ def create_ordered_zone(file_handle, zone_name, shape, var_sharing=None, var_dat
 
 
 def zone_set_solution_time(file_handle, zone, strand=0, solution_time=0):
+    if file_handle is None or zone is None:
+        return
+
     tecio.tecZoneSetUnsteadyOptions.restype = ctypes.c_int32
     tecio.tecZoneSetUnsteadyOptions.argtypes = (
         ctypes.c_void_p,  # file_handle
@@ -948,6 +988,9 @@ def zone_set_solution_time(file_handle, zone, strand=0, solution_time=0):
 
 
 def zone_write_double_values(file_handle, zone, var, values):
+    if file_handle is None or zone is None:
+        return
+
     tecio.tecZoneVarWriteDoubleValues.restype = ctypes.c_int32
     tecio.tecZoneVarWriteDoubleValues.argtypes = (
         ctypes.c_void_p,  # file_handle
