@@ -25,15 +25,6 @@ from functools import partial
 from p_tqdm import p_map
 from tqdm.auto import tqdm
 from scipy.spatial import KDTree
-from multiprocessing import Pool
-from itertools import repeat
-from joblib import Parallel, delayed
-
-
-def EikonalParallel(nRay):
-    y = EikonalSolver.Solve(Solver, InitialConditions[nRay])
-    print("Integration finished for Ray n =", nRay)
-    return y
 
 
 if __name__ == "__main__":
@@ -148,15 +139,7 @@ if __name__ == "__main__":
 
     if Solver.Parallel:
         print("Parallel Simulation")
-        if Solver.Parallel_Method == "joblib":
-            EikonalSolutions = Parallel(n_jobs=Solver.nProcess)(delayed(EikonalParallel)(k) for k in range(totalRay))
-        elif Solver.Parallel_Method == "pool":
-            with Pool(processes=Solver.nProcess) as pool:
-                EikonalSolutions = pool.starmap(
-                    EikonalSolver.Solve, zip(repeat(Solver), repeat(BoundaryES), repeat(BoundaryPEC), InitialConditions)
-                )
-        elif Solver.Parallel_Method == "p_map":
-            EikonalSolutions = p_map(partial(EikonalSolver.Solve, Solver), InitialConditions)
+        EikonalSolutions = p_map(partial(EikonalSolver.Solve, Solver), InitialConditions)
     else:
         print("Serial Simulation")
         EikonalSolutions = [EikonalSolver.Solve(Solver, y0) for y0 in tqdm(InitialConditions)]
